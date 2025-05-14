@@ -1,0 +1,1624 @@
+Okay, this will be a multi-part delivery. I'll provide the code for each file, one by one, starting with `app.py` as it's the backbone.
+
+**Part 1: `app.py` (Updated for New Requirements)**
+
+This version includes:
+*   Removal of "Part Drawing."
+*   Simplified user roles for tab access (no granular field permissions for users).
+*   `MASTER_FIELD_DEFINITIONS` updated, especially for ATS to be comprehensive.
+*   Admin section "Add data to database" for POs (updates `dummy_database`).
+*   Admin section "Manage Criteria" for ATS (updates `ATS_VALIDATION_CRITERIA_DB`).
+*   Storage of extracted ATS data into `RESUMES_DATA_DB`.
+*   User-side PO verification compares against admin-entered `dummy_database`.
+*   User-side ATS verification validates against admin-set `ATS_VALIDATION_CRITERIA_DB`.
+*   Placeholders for PDF report generation.
+
+```python
+import os
+import re
+import secrets
+import string
+import random
+from functools import wraps
+import json
+import uuid # For unique IDs for criteria and resume entries
+
+from flask import (
+    Flask, render_template, request, redirect, url_for,
+    session, flash, jsonify, Response
+)
+from werkzeug.security import generate_password_hash, check_password_hash
+from pdfminer.high_level import extract_text as pdf_extract_text
+from docx import Document as DocxDocument
+import requests
+# For PDF Generation (Install reportlab: pip install reportlab)
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib import colors
+from io import BytesIO
+
+
+# --- App Setup ---
+TEMP_FOLDER = os.path.join(os.path.dirname(__file__), 'temp')
+os.makedirs(TEMP_FOLDER, exist_ok=True)
+
+app = Flask(__name__)
+app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(16))
+
+# --- Configuration ---
+OCR_SPACE_API_URL = "https://api.ocr.space/parse/image"
+OCR_SPACE_API_KEY = os.environ.get('OCR_SPACE_API_KEY', "K87955728688957")
+if OCR_SPACE_API_KEY == "K87955728688957":
+    print("Warning: Using default/placeholder OCR Space API key.")
+
+# --- Master Field Definitions (For Admin "Configure Fields" Modal) ---
+# These are the fields admin can CHOOSE to work with in "Add PO Data" or "Manage ATS Criteria"
+MASTER_FIELD_DEFINITIONS = {
+    "po": [
+        {"id": "po_num", "label": "PO Number", "description": "Purchase Order Number"},
+        {"id": "po_vendor_id", "label": "Vendor ID", "description": "Vendor Identifier"},
+        {"id": "po_phone", "label": "Phone", "description": "Vendor Phone"},
+        {"id": "po_total", "label": "Total Amount", "description": "Grand Total of PO"},
+        {"id": "po_order_date", "label": "Order Date", "description": "Date PO was issued"},
+        {"id": "po_vendor_name", "label": "Vendor Name", "description": "Full Name of Vendor"},
+        # Add any other fields you want the admin to be able to enter data for
+    ],
+    "ats": [
+        {"id": "ats_name", "label": "Name", "description": "Candidate's Full Name"},
+        {"id": "ats_sr_no", "label": "Sr no.", "description": "Serial or Reference Number"},
+        {"id": "ats_gender", "label": "Gender", "description": "Candidate's Gender"},
+        {"id": "ats_phone", "label": "Phone", "description": "Candidate's Phone Number"},
+        {"id": "ats_city", "label": "City", "description": "Candidate's City"},
+        {"id": "ats_age", "label": "Age", "description": "Candidate's Age (numeric)"},
+        {"id": "ats_country", "label": "Country", "description": "Candidate's Country"},
+        {"id": "ats_address", "label": "Address", "description": "Candidate's Full Address"},
+        {"id": "ats_email", "label": "Email", "description": "Candidate's Email Address"},
+        {"id": "ats_skills", "label": "Skills", "description": "Comma-separated skills"},
+        {"id": "ats_salary", "label": "Salary", "description": "Salary Information (numeric part)"},
+        {"id": "ats_percentage", "label": "Percentage", "description": "Relevant Percentage/Score (numeric)"},
+        # Add other fields from resumes an admin might want to set criteria for
+    ]
+}
+
+# --- Fields for User-Side Extraction & Display (Fixed System Definitions) ---
+# These are the fields the system will ALWAYS try to extract for users and display if found.
+# These are LABELS.
+PO_FIELDS_FOR_USER_EXTRACTION = ["PO Number", "Vendor ID", "Phone", "Total Amount", "Order Date", "Vendor Name"]
+ATS_FIELDS_FOR_USER_EXTRACTION = ["Name", "Sr no.", "Gender", "Phone", "City", "Age", "Country", "Address", "Email", "Skills", "Salary", "Percentage"]
+
+# --- Key Fields for PO Comparison (Against dummy_database) ---
+# These are LABELS.
+PO_KEY_COMPARISON_FIELDS = ["PO Number", "Vendor ID", "Phone", "Total Amount", "Order Date"]
+
+
+# --- Available Tabs ---
+AVAILABLE_TABS = {
+    "po": {"id": "po", "name": "PO Verification", "icon": "fas fa-file-invoice"},
+    "ats": {"id": "ats", "name": "ATS Verification", "icon": "fas fa-file-alt"},
+}
+
+# --- Data Storage ---
+# USERS_DB: Simplified - role determines tab access. No per-user field permissions.
+USERS_DB = {
+    "admin@example.com": {"username": "Admin User", "hashed_password": generate_password_hash("admin@a123"), "role": "admin"},
+    "subadmin@example.com": {"username": "Sub Admin", "hashed_password": generate_password_hash("sub@123"), "role": "sub_admin"}, # Access to PO & ATS
+    "po_user@example.com": {"username": "PO Verifier", "hashed_password": generate_password_hash("po@123"), "role": "po_verifier"},     # Access to PO only
+    "ats_user@example.com": {"username": "ATS Verifier", "hashed_password": generate_password_hash("ats@123"), "role": "ats_verifier"}     # Access to ATS only
+}
+
+# DUMMY_DATABASE: For PO comparison, populated by admin. Lookup key is PO Number.
+# Values should correspond to labels in PO_KEY_COMPARISON_FIELDS.
+dummy_database = { # Renamed to po_data_db for clarity
+    "po": {
+        "81100": {"PO Number": "81100", "Vendor ID": "S101334", "Phone": "734-426-3655", "Total Amount": "$ 5,945.00", "Order Date": "8/8/2024"}
+    }
+}
+
+# ATS_VALIDATION_CRITERIA_DB: For ATS rules, managed by admin.
+ATS_VALIDATION_CRITERIA_DB = { # Dict of lists for easier management by field label
+    # Example: field_label: [ {id, condition_type, value1, value2, is_active}, ... ]
+    "Age": [
+        {"id": str(uuid.uuid4()), "condition_type": "range_numeric", "min_value": 18, "max_value": 30, "is_active": True}
+    ],
+    "Salary": [
+        {"id": str(uuid.uuid4()), "condition_type": "range_numeric", "min_value": 50000, "max_value": 200000, "is_active": True}
+    ],
+    "Percentage": [
+        {"id": str(uuid.uuid4()), "condition_type": "range_numeric", "min_value": 60, "max_value": 100, "is_active": True}
+    ],
+    "Skills": [ # Example of a different type of criteria
+        {"id": str(uuid.uuid4()), "condition_type": "contains_any", "keywords": ["java", "python"], "is_active": True} # Keywords will be lowercased
+    ]
+}
+
+# RESUMES_DATA_DB: To store extracted ATS data.
+RESUMES_DATA_DB = {} # { "resume_file_id_or_name": {extracted_field_label: value, ...} }
+
+
+# --- Helper, Auth, OCR, Extraction, Comparison functions ---
+# (Many of these are similar to previous versions, with adjustments)
+
+def generate_temporary_password(length=12):
+    # (Implementation from previous)
+    alphabet = string.ascii_letters + string.digits + string.punctuation
+    while True:
+        password = ''.join(secrets.choice(alphabet) for i in range(length))
+        if (any(c.islower() for c in password) and any(c.isupper() for c in password)
+                and any(c.isdigit() for c in password) and any(c in string.punctuation for c in password)):
+            break
+    return password
+
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'logged_in_email' not in session: # Changed session key for clarity
+            flash('Please log in to access this page.', 'warning')
+            return redirect(url_for('login_page'))
+        # Admin redirection
+        if session.get('role') == 'admin':
+             # If admin tries to access '/app', redirect them.
+             # This assumes admin_required will protect admin routes.
+             if request.endpoint == 'app_dashboard':
+                flash('Admins should use the admin console.', 'info')
+                return redirect(url_for('admin_dashboard'))
+        # Non-admin tab access check
+        elif not session.get('accessible_tabs_info'):
+            flash('You do not have access to any application modules.', 'warning')
+            return redirect(url_for('landing_page')) # Or logout
+        return f(*args, **kwargs)
+    return decorated_function
+
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'logged_in_email' not in session or session.get('role') != 'admin':
+            flash('Admin access required.', 'danger')
+            return redirect(url_for('admin_login_page'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+# (OCR, Text Extraction functions: ocr_image_via_api, extract_text_from_pdf, extract_text_from_docx, extract_text_from_file - keep robust versions)
+def ocr_image_via_api(image_path):
+    if OCR_SPACE_API_KEY == "K87955728688957": print("Warning: OCR with placeholder API key.")
+    try:
+        with open(image_path, 'rb') as f: image_data = f.read()
+        payload = {'apikey': OCR_SPACE_API_KEY, 'language': 'eng', 'isOverlayRequired': False, 'detectOrientation': True}
+        files = {'file': (os.path.basename(image_path), image_data)}
+        response = requests.post(OCR_SPACE_API_URL, files=files, data=payload, timeout=45)
+        response.raise_for_status()
+        result = response.json()
+        if result and not result.get('IsErroredOnProcessing'):
+            parsed_results = result.get('ParsedResults')
+            if parsed_results and len(parsed_results) > 0:
+                return parsed_results[0].get('ParsedText', "No text in image.").strip()
+            return "No parsed results in OCR."
+        err_msg = (result.get('ErrorMessage') or ["Unknown OCR Error"])[0] if result.get('ErrorMessage') else "Unknown OCR Error"
+        details = result.get('ErrorDetails', "")
+        return f"OCR API Error: {err_msg} - {details}"
+    except requests.exceptions.Timeout: return "OCR API Error: Request timed out."
+    except requests.exceptions.RequestException as e: return f"OCR Connection Error: {e}"
+    except Exception as e: return f"OCR Processing Error: {e}"
+
+def extract_text_from_pdf(file_path):
+    try:
+        text = pdf_extract_text(file_path)
+        text = text.strip() if text else ""
+        if len(text) < 150 and ('.pdf' in file_path.lower()):
+            print(f"DEBUG: PDF '{os.path.basename(file_path)}' has little text ({len(text)} chars). Attempting OCR.")
+            ocr_text = ocr_image_via_api(file_path)
+            if ocr_text and not ocr_text.startswith("Error"): return ocr_text
+            return f"Error: PDF yielded little text, OCR also failed. OCR: {ocr_text}" if text else "Error: Empty PDF, OCR failed."
+        return text if text else "No text extracted from PDF."
+    except Exception as e:
+        print(f"DEBUG: pdfminer failed for '{os.path.basename(file_path)}': {e}. Fallback to OCR.")
+        try:
+            ocr_text = ocr_image_via_api(file_path)
+            return ocr_text if ocr_text and not ocr_text.startswith("Error") else f"Error: pdfminer failed, OCR fallback also failed. OCR: {ocr_text}"
+        except Exception as ocr_e: return f"Error: pdfminer failed, OCR fallback exception: {ocr_e}. Original: {e}"
+
+def extract_text_from_docx(file_path):
+    try:
+        doc = DocxDocument(file_path)
+        return '\n'.join([p.text for p in doc.paragraphs if p.text.strip()]).strip() or "No text in DOCX."
+    except Exception as e: return f"Error extracting from DOCX: {e}"
+
+def extract_text_from_file(file_path, filename):
+    ext = filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+    if ext in ['png', 'jpg', 'jpeg', 'bmp', 'gif', 'tiff', 'tif']: return ocr_image_via_api(file_path)
+    elif ext == 'pdf': return extract_text_from_pdf(file_path)
+    elif ext == 'docx': return extract_text_from_docx(file_path)
+    return f"Error: Unsupported file format '{ext}'."
+
+
+def extract_structured_data(text, fields_to_extract_labels, upload_type=None):
+    # (Keep the enhanced version from our last exchange that handles PO and Quote PDF specific fields)
+    # This will need significant tuning for accuracy.
+    if not text or not fields_to_extract_labels: return {}
+    data = {label: None for label in fields_to_extract_labels}
+    lines = text.strip().split('\n')
+    text_content_lower = text.lower()
+
+    # Generic pass (can be improved with more sophisticated NLP if needed)
+    for i, line_text in enumerate(lines):
+        line_strip = line_text.strip()
+        for field_label in fields_to_extract_labels:
+            if data[field_label] is not None and field_label not in ["Vendor ID", "Phone", "Sales Contact", "Quote Terms", "Part Number", "Description", "Revision"]: # Allow specific logic to overwrite for these complex fields
+                continue
+            pattern_label = re.escape(field_label)
+            match = re.match(r"^\s*" + pattern_label + r"\s*:?\s*(.+)", line_strip, re.IGNORECASE)
+            if match:
+                value = match.group(1).strip()
+                if value:
+                    if field_label not in ["Vendor ID", "Phone", "Sales Contact", "Quote Terms", "Part Number", "Description", "Revision"]:
+                         data[field_label] = value; break
+                    elif data[field_label] is None: data[field_label] = value
+    
+    # --- PO Specific Extraction from your refined list ---
+    if upload_type == 'po':
+        if "PO Number" in fields_to_extract_labels and data["PO Number"] is None:
+            m = re.search(r"(?:P(?:urchase|\.O\.)\s*O(?:rder)?\s*No(?:Number|\.)?)\s*[:\-]?\s*([A-Z0-9\-]+)", text, re.IGNORECASE)
+            if m: data["PO Number"] = m.group(1).strip()
+        if "Vendor ID" in fields_to_extract_labels: # Changed label to "Vendor ID"
+            m = re.search(r"\bVendor\s*[:\-]?\s*(S\d+)\b", text, re.IGNORECASE) # "Vendor" is the label in MASTER_FIELD_DEFINITIONS now for this
+            if m: data["Vendor ID"] = m.group(1).strip() # Storing under "Vendor ID"
+        if "Phone" in fields_to_extract_labels:
+             # Contextual phone search logic from previous response
+            data["Phone"] = None 
+            vendor_block_text = ""
+            vendor_header_match = re.search(r"Vendor\s*[:\-]\s*", text, re.IGNORECASE)
+            if vendor_header_match:
+                end_boundary_keywords = ["Ship To:", "F\.O\.B:", "Terms:", "Email:"]
+                vendor_block_end_pos = len(text)
+                for kw in end_boundary_keywords:
+                    match_end = re.search(kw, text[vendor_header_match.end():], re.IGNORECASE)
+                    if match_end: vendor_block_end_pos = vendor_header_match.end() + match_end.start(); break
+                if vendor_block_end_pos == len(text): vendor_block_text = text[vendor_header_match.end() : min(len(text), vendor_header_match.end() + 400)]
+                else: vendor_block_text = text[vendor_header_match.end() : vendor_block_end_pos]
+                phone_in_vendor_block = re.search(r"\bPhone\s*[:\-]?\s*(\(?\d{3}\)?[\s\.\-]?\d{3}[\s\.\-]?\d{4}(?:\s*x\d+)?)", vendor_block_text, re.IGNORECASE)
+                if phone_in_vendor_block: data["Phone"] = phone_in_vendor_block.group(1).strip()
+                else:
+                    phone_pattern_only = re.search(r"(\(?\d{3}\)?[\s\.\-]?\d{3}[\s\.\-]?\d{4}(?:\s*x\d+)?)", vendor_block_text)
+                    if phone_pattern_only: data["Phone"] = phone_pattern_only.group(1).strip()
+            if data["Phone"] is None: # Fallback general search
+                m_phone_general = re.search(r"\bPhone\s*[:\-]?\s*(\(?\d{3}\)?[\s\.\-]?\d{3}[\s\.\-]?\d{4}(?:\s*x\d+)?)", text, re.IGNORECASE)
+                if m_phone_general: data["Phone"] = m_phone_general.group(1).strip()
+
+        if "Total Amount" in fields_to_extract_labels and data["Total Amount"] is None: # Changed label to "Total Amount"
+            keywords_ordered = ["Grand Total", "TOTAL DUE", "Amount Due", "Total Balance", "Total Amount", "TOTAL"]
+            found_total_val = None
+            for kw in keywords_ordered:
+                m = re.search(r"\b" + re.escape(kw) + r"\b\s*[:\-]?\s*([\$€£]?\s*\d{1,3}(?:,\d{3})*(?:\.\d{2}))", text, re.IGNORECASE | re.MULTILINE)
+                if m: found_total_val = m.group(1).strip(); break
+            if found_total_val: data["Total Amount"] = found_total_val
+            else: 
+                amounts = re.findall(r"([\$€£]?\s*\d{1,3}(?:,\d{3})*\.\d{2})\b", text)
+                if amounts: data["Total Amount"] = amounts[-1].strip()
+        if "Order Date" in fields_to_extract_labels and data["Order Date"] is None:
+            m = re.search(r"Order Date\s*[:\-]?\s*(\d{1,2}[/\-.]\d{1,2}[/\-.]\d{2,4})", text, re.IGNORECASE)
+            if m: data["Order Date"] = m.group(1).strip()
+        if "Vendor Name" in fields_to_extract_labels and data["Vendor Name"] is None:
+             m = re.search(r"Vendor\s*[:\-]?\s*\n\s*([A-Z][A-Za-z\s.,&'-]+(?:INC\.|LLC|LTD|CO\.?)\b|[A-Z][A-Za-z\s.,&'-]{5,})", text, re.IGNORECASE | re.MULTILINE)
+             if m: data["Vendor Name"] = m.group(1).strip()
+
+
+    elif upload_type == 'ats': # For ATS specific extraction from your sample
+        if "Name" in fields_to_extract_labels and data["Name"] is None:
+            m = re.search(r"Name\s*[:\-]?\s*(.+)", text, re.IGNORECASE)
+            if m: data["Name"] = m.group(1).strip()
+        if "Sr no." in fields_to_extract_labels and data["Sr no."] is None:
+            m = re.search(r"Sr no\.\s*[:\-]?\s*([A-Z0-9]+)", text, re.IGNORECASE)
+            if m: data["Sr no."] = m.group(1).strip()
+        if "Gender" in fields_to_extract_labels and data["Gender"] is None:
+            m = re.search(r"Gender\s*[:\-]?\s*([A-Za-z])", text, re.IGNORECASE)
+            if m: data["Gender"] = m.group(1).strip().upper()
+        # Phone for ATS is already handled by generic or can be made more specific if needed
+        if "City" in fields_to_extract_labels and data["City"] is None:
+            m = re.search(r"City\s*[:\-]?\s*([A-Za-z\s]+)", text, re.IGNORECASE)
+            if m: data["City"] = m.group(1).strip()
+        if "Age" in fields_to_extract_labels and data["Age"] is None:
+            m = re.search(r"Age\s*[:\-]?\s*(\d+)", text, re.IGNORECASE)
+            if m: data["Age"] = m.group(1).strip()
+        if "Country" in fields_to_extract_labels and data["Country"] is None:
+            m = re.search(r"Country\s*[:\-]?\s*([A-Za-z\s]+)", text, re.IGNORECASE)
+            if m: data["Country"] = m.group(1).strip()
+        if "Address" in fields_to_extract_labels and data["Address"] is None:
+            m = re.search(r"Address\s*[:\-]?\s*([^\n]+)", text, re.IGNORECASE) # Grabs rest of line
+            if m: data["Address"] = m.group(1).strip()
+        if "Email" in fields_to_extract_labels and data["Email"] is None:
+            m = re.search(r"Email\s*[:\-]?\s*([\w\.-]+@[\w\.-]+\.\w+)", text, re.IGNORECASE)
+            if m: data["Email"] = m.group(1).strip()
+        if "Skills" in fields_to_extract_labels and data["Skills"] is None:
+            m = re.search(r"Skills\s*[:\-]?\s*([^\n]+)", text, re.IGNORECASE)
+            if m: data["Skills"] = m.group(1).strip().replace('.',',') # Normalize
+        if "Salary" in fields_to_extract_labels and data["Salary"] is None:
+            m = re.search(r"Salary\s*[:\-]?\s*([\$€£]?\s*\d[\d,]*\.?\d*)", text, re.IGNORECASE) # Extracts numeric part
+            if m: data["Salary"] = re.sub(r'[^\d.]', '', m.group(1)) # Keep only digits and .
+        if "Percentage" in fields_to_extract_labels and data["Percentage"] is None:
+            m = re.search(r"Percentage\s*[:\-]?\s*(\d+\.?\d*%?)", text, re.IGNORECASE)
+            if m: data["Percentage"] = re.sub(r'[^\d.]', '', m.group(1)) # Keep only digits and .
+    return data
+
+# --- Database Comparison / ATS Criteria Validation ---
+def get_po_db_record(po_number_value): # Specific for PO
+    return dummy_database.get("po", {}).get(po_number_value)
+
+def compare_po_data(extracted_data, db_record):
+    # (This is similar to the generic compare_data but specific to PO_KEY_COMPARISON_FIELDS)
+    if not db_record: return 0, {}, "PO record not in database."
+    matched, mismatched = 0, {}
+    comparable_fields_in_db = [f for f in PO_KEY_COMPARISON_FIELDS if f in db_record]
+    if not comparable_fields_in_db: return 0, {}, "No comparison fields in DB record."
+    total_comp_fields = len(comparable_fields_in_db)
+
+    for label in comparable_fields_in_db:
+        db_val = str(db_record.get(label, "")).strip().lower().replace('$', '').replace(',', '')
+        ext_val = str(extracted_data.get(label, "")).strip().lower().replace('$', '').replace(',', '')
+        if ext_val == db_val and db_val != "": matched += 1
+        elif db_record.get(label) is not None : mismatched[label] = {"db_value": db_record.get(label), "extracted_value": extracted_data.get(label, "")}
+    accuracy = (matched / total_comp_fields) * 100 if total_comp_fields > 0 else 0
+    return accuracy, mismatched, None
+
+def validate_ats_data_with_criteria(extracted_ats_data):
+    # (New function to validate ATS against ATS_VALIDATION_CRITERIA_DB)
+    passed_criteria_count = 0
+    failed_criteria_details = {} # {field_label: "Reason for failure"}
+    total_active_criteria_count = 0
+
+    for field_label, criteria_list in ATS_VALIDATION_CRITERIA_DB.items():
+        extracted_value_str = extracted_ats_data.get(field_label)
+        for criterion in criteria_list:
+            if not criterion.get("is_active", False): continue
+            total_active_criteria_count += 1
+            field_passed = False
+            try:
+                if criterion["condition_type"] == "range_numeric":
+                    if extracted_value_str is not None:
+                        val = float(re.sub(r'[^\d.]', '', extracted_value_str)) # Clean string to float
+                        if criterion.get("min_value", -float('inf')) <= val <= criterion.get("max_value", float('inf')):
+                            passed_criteria_count += 1
+                            field_passed = True
+                        else:
+                             failed_criteria_details[field_label] = f"Value '{val}' out of range ({criterion.get('min_value')} - {criterion.get('max_value')})"
+                    else: failed_criteria_details[field_label] = "Value not extracted for range check."
+
+                elif criterion["condition_type"] == "contains_any":
+                    if extracted_value_str:
+                        keywords = [kw.lower().strip() for kw in criterion.get("keywords", [])]
+                        if any(kw in extracted_value_str.lower() for kw in keywords):
+                            passed_criteria_count += 1
+                            field_passed = True
+                        else:
+                            failed_criteria_details[field_label] = f"Did not contain any of required keywords: {', '.join(keywords)}"
+                    else: failed_criteria_details[field_label] = "Skills not extracted for keyword check."
+                # Add more condition types here (equals, is_one_of, date_range etc.)
+            except ValueError:
+                failed_criteria_details[field_label] = f"Could not convert '{extracted_value_str}' to number for comparison."
+            except Exception as e:
+                 failed_criteria_details[field_label] = f"Error validating: {str(e)}"
+            if field_passed: # If one criterion for a field passed, remove failure message for that field (or handle complex logic)
+                if field_label in failed_criteria_details: del failed_criteria_details[field_label]
+
+
+    accuracy = (passed_criteria_count / total_active_criteria_count) * 100 if total_active_criteria_count > 0 else 0
+    # Mismatched fields are the ones that failed validation
+    return accuracy, failed_criteria_details, total_active_criteria_count
+
+
+# (Routes: login_page, admin_login_page, logout - Keep as is, using session keys like 'logged_in_email', 'role')
+# (_load_user_session_data - Update for simpler role-based tab access)
+# (Admin dashboard route & All Admin APIs: Keep as is, NO criteria APIs)
+# (PDF Report Generation - Placeholder routes)
+# --- Login/Session Management & Basic Routes ---
+@app.route('/', methods=['GET'])
+def landing_page():
+    if 'logged_in_email' in session: # Changed session key
+        if session.get('role') == 'admin': return redirect(url_for('admin_dashboard'))
+        if session.get('accessible_tabs_info'): return redirect(url_for('app_dashboard'))
+    return render_template('Template1.html')
+
+def _load_user_session_data(user_email, user_data_from_db):
+    session['logged_in_email'] = user_email # Use email as main session identifier
+    session['username'] = user_data_from_db.get("username", user_email.split('@')[0])
+    session['role'] = user_data_from_db.get('role', 'user') # Default to 'user' if no role
+
+    accessible_tabs_info = {}
+    user_role = session['role']
+
+    if user_role == "sub_admin":
+        accessible_tabs_info["po"] = AVAILABLE_TABS["po"]
+        accessible_tabs_info["ats"] = AVAILABLE_TABS["ats"]
+    elif user_role == "po_verifier":
+        accessible_tabs_info["po"] = AVAILABLE_TABS["po"]
+    elif user_role == "ats_verifier":
+        accessible_tabs_info["ats"] = AVAILABLE_TABS["ats"]
+    # Admins don't use this dashboard, their access is controlled by @admin_required
+
+    session['accessible_tabs_info'] = accessible_tabs_info
+
+@app.route('/login', methods=['GET', 'POST'])
+def login_page():
+    if 'logged_in_email' in session:
+        if session.get('role') == 'admin': return redirect(url_for('admin_dashboard'))
+        if session.get('accessible_tabs_info'): return redirect(url_for('app_dashboard'))
+    if request.method == 'POST':
+        email = request.form.get('email'); password = request.form.get('password')
+        user_data = USERS_DB.get(email)
+        if user_data and user_data.get('role') != 'admin' and check_password_hash(user_data['hashed_password'], password):
+            _load_user_session_data(email, user_data)
+            if not session.get('accessible_tabs_info') and session.get('role') != 'admin': # Check if any tabs assigned
+                flash('Login successful, but no assigned modules.', 'warning'); session.clear(); return redirect(url_for('login_page'))
+            flash(f'Welcome {session["username"]}!', 'success'); return redirect(url_for('app_dashboard'))
+        else: flash('Invalid credentials or not authorized.', 'danger')
+    return render_template('login.html')
+
+@app.route('/admin', methods=['GET', 'POST'])
+def admin_login_page():
+    if 'logged_in_email' in session and session.get('role') == 'admin': return redirect(url_for('admin_dashboard'))
+    if request.method == 'POST':
+        email, password = request.form.get('email'), request.form.get('password')
+        user_data = USERS_DB.get(email)
+        if user_data and user_data.get('role') == 'admin' and check_password_hash(user_data['hashed_password'], password):
+            _load_user_session_data(email, user_data) # Load admin session data (username, role)
+            flash('Admin login successful!', 'success'); return redirect(url_for('admin_dashboard'))
+        else: flash('Invalid admin credentials.', 'danger')
+    return render_template('admin_login.html')
+
+@app.route('/logout')
+def logout():
+    keys_to_pop = ['logged_in_email', 'username', 'role', 'accessible_tabs_info']
+    for key in keys_to_pop: session.pop(key, None)
+    flash('You have been logged out.', 'info'); return redirect(url_for('landing_page'))
+
+
+# --- User Dashboard Route ---
+@app.route('/app', methods=['GET', 'POST'])
+@login_required
+def app_dashboard():
+    results = {}
+    accessible_tabs_info = session.get('accessible_tabs_info', {})
+    if not accessible_tabs_info:
+        flash("No accessible modules for your role.", 'warning'); return redirect(url_for('landing_page'))
+
+    default_tab_id = next(iter(accessible_tabs_info)) # First accessible tab
+    active_tab_id = request.form.get('active_tab_id', default_tab_id)
+    if active_tab_id not in accessible_tabs_info: active_tab_id = default_tab_id
+
+    if request.method == 'POST':
+        upload_type = request.form.get('upload_type') # 'po' or 'ats'
+        if upload_type not in accessible_tabs_info:
+            flash(f"Access denied for {upload_type.upper()} processing.", "danger"); return redirect(url_for('app_dashboard'))
+        active_tab_id = upload_type
+
+        if 'document' not in request.files: flash('No file part in request.', 'warning')
+        else:
+            doc_files = request.files.getlist('document')
+            if not doc_files or all(f.filename == '' for f in doc_files): flash('No files selected.', 'warning')
+            else:
+                processed_count = 0
+                for doc_file in doc_files:
+                    filename = doc_file.filename; temp_filename = f"{secrets.token_hex(4)}_{filename}"
+                    temp_file_path = os.path.join(TEMP_FOLDER, temp_filename)
+                    file_results = {}
+                    try:
+                        doc_file.save(temp_file_path)
+                        extracted_text = extract_text_from_file(temp_file_path, filename)
+                        file_results["extracted_text"] = extracted_text
+
+                        if extracted_text and not extracted_text.startswith("Error"):
+                            structured_data = {}
+                            accuracy = 0; mismatched_fields = {}; comparison_error = "Processing error."
+                            db_record_for_display = None; compared_fields_list_for_template = []
+
+                            if upload_type == 'po':
+                                structured_data = extract_structured_data(extracted_text, PO_FIELDS_FOR_USER_EXTRACTION, 'po')
+                                po_number = structured_data.get("PO Number")
+                                if po_number:
+                                    db_record = get_po_db_record(po_number)
+                                    accuracy, mismatched_fields, comparison_error = compare_po_data(structured_data, db_record)
+                                    if db_record: # For display, only show fields that were part of comparison
+                                        db_record_for_display = {k: v for k,v in db_record.items() if k in PO_KEY_COMPARISON_FIELDS}
+                                        compared_fields_list_for_template = PO_KEY_COMPARISON_FIELDS
+                                else: comparison_error = "PO Number not extracted for DB comparison."
+                            
+                            elif upload_type == 'ats':
+                                structured_data = extract_structured_data(extracted_text, ATS_FIELDS_FOR_USER_EXTRACTION, 'ats')
+                                # Store extracted ATS data
+                                resume_id = f"resume_{filename}_{str(uuid.uuid4())[:8]}"
+                                RESUMES_DATA_DB[resume_id] = structured_data
+                                print(f"Stored ATS data for {resume_id}") # Log storage
+
+                                accuracy, mismatched_fields, total_criteria = validate_ats_data_with_criteria(structured_data)
+                                comparison_error = None if total_criteria > 0 else "No active ATS criteria defined by admin."
+                                # For ATS, "mismatched_fields" from validate_ats_data_with_criteria contains failed criteria
+                                # compared_fields_list for ATS will be the fields that had active criteria
+                                compared_fields_list_for_template = [f_label for f_label, crits in ATS_VALIDATION_CRITERIA_DB.items() if any(c.get('is_active') for c in crits)]
+
+
+                            file_results.update({
+                                "structured_data": structured_data, "accuracy": accuracy,
+                                "mismatched_fields": mismatched_fields, "comparison_error": comparison_error,
+                                "db_record_for_display": db_record_for_display, # Only for PO
+                                "compared_fields_list": compared_fields_list_for_template
+                            })
+                            processed_count += 1
+                        else: file_results["error"] = extracted_text or "Text extraction failed."
+                        results[filename] = file_results
+                    except Exception as e: results[filename] = {"error": f"Error: {str(e)}"}; app.logger.error(f"Err: {filename}: {e}", exc_info=True)
+                    finally:
+                        if os.path.exists(temp_file_path):
+                            try: os.remove(temp_file_path)
+                            except OSError as e_os: app.logger.error(f"Err removing temp: {e_os}")
+                if processed_count: flash(f'Processed {processed_count} file(s).', 'info')
+                else: flash('No files processed.', 'warning')
+    
+    return render_template('app_dashboard.html',
+                           results=results, accessible_tabs_info=accessible_tabs_info, active_tab_id=active_tab_id,
+                           current_tab_display_name=accessible_tabs_info.get(active_tab_id, {}).get("name", "Dashboard"),
+                           # Pass comparison field lists for the template to display "based on" text
+                           PO_KEY_COMPARISON_FIELDS = PO_KEY_COMPARISON_FIELDS,
+                           ATS_FIELDS_FOR_CRITERIA = [f_label for f_label, crits in ATS_VALIDATION_CRITERIA_DB.items() if any(c.get('is_active') for c in crits)] # Pass fields with active criteria
+                           )
+
+# --- Admin Routes & APIs ---
+@app.route('/admin/dashboard')
+@admin_required
+def admin_dashboard():
+    # For "Configure Fields" modal in admin panel (from your new admin_dashboard.html)
+    # This data is used by the JavaScript you provided for that modal.
+    admin_configurable_fields = {
+        "po": MASTER_FIELD_DEFINITIONS["po"], # Fields admin can choose to enter data for
+        "ats": MASTER_FIELD_DEFINITIONS["ats"] # Fields admin can choose to set criteria for
+    }
+    return render_template('admin_dashboard.html',
+        predefined_fields_json=json.dumps(admin_configurable_fields) # For JS in admin panel
+    )
+
+# --- Admin API for PO Data Entry ---
+@app.route('/api/admin/po_database_entry', methods=['POST'])
+@admin_required
+def api_add_po_data_entry():
+    data = request.json # Expects { "PO Number": "value", "Vendor ID": "value", ... }
+    po_number = data.get("PO Number")
+    if not po_number:
+        return jsonify({"error": "PO Number is required to save entry."}), 400
+    
+    # Validate that all submitted keys are valid PO field labels
+    valid_po_labels = {f["label"] for f in MASTER_FIELD_DEFINITIONS["po"]}
+    entry_data = {}
+    for key, value in data.items():
+        if key in valid_po_labels:
+            entry_data[key] = value
+        else:
+            print(f"Warning: Received unknown field '{key}' in PO data entry. Ignoring.")
+
+    if not entry_data.get("PO Number"): # Ensure PO Number is still there after filtering
+         return jsonify({"error": "PO Number field data missing after validation."}), 400
+
+    dummy_database["po"][po_number] = entry_data # Add or update
+    print(f"Admin updated/added PO data for {po_number}: {entry_data}")
+    return jsonify({"message": f"PO data for '{po_number}' saved successfully."}), 200
+
+# --- Admin APIs for ATS Criteria Management ---
+@app.route('/api/admin/ats_criteria', methods=['GET'])
+@admin_required
+def api_get_ats_criteria():
+    return jsonify(ATS_VALIDATION_CRITERIA_DB)
+
+@app.route('/api/admin/ats_criteria', methods=['POST'])
+@admin_required
+def api_add_ats_criterion():
+    data = request.json
+    # Expected data: {"field_label": "Age", "condition_type": "range_numeric", "min_value": 18, "max_value": 30}
+    # Or: {"field_label": "Skills", "condition_type": "contains_any", "keywords": ["java", "c++"]}
+    field_label = data.get("field_label")
+    condition_type = data.get("condition_type")
+
+    if not field_label or not condition_type:
+        return jsonify({"error": "Field label and condition type are required."}), 400
+    
+    # Validate field_label against MASTER_FIELD_DEFINITIONS["ats"]
+    if not any(f["label"] == field_label for f in MASTER_FIELD_DEFINITIONS["ats"]):
+        return jsonify({"error": f"Invalid field label for ATS: {field_label}"}), 400
+
+    new_criterion = {"id": str(uuid.uuid4()), "is_active": True, **data} # Add ID and default active state
+
+    if field_label not in ATS_VALIDATION_CRITERIA_DB:
+        ATS_VALIDATION_CRITERIA_DB[field_label] = []
+    
+    # Prevent duplicate criteria (simple check, could be more sophisticated)
+    # For now, allow multiple criteria for the same field
+    ATS_VALIDATION_CRITERIA_DB[field_label].append(new_criterion)
+    print(f"Admin added ATS criterion for {field_label}: {new_criterion}")
+    return jsonify({"message": "ATS criterion added.", "criterion": new_criterion}), 201
+
+@app.route('/api/admin/ats_criteria/<string:field_label>/<string:criterion_id>', methods=['PUT'])
+@admin_required
+def api_update_ats_criterion(field_label, criterion_id):
+    data = request.json
+    if field_label not in ATS_VALIDATION_CRITERIA_DB:
+        return jsonify({"error": f"No criteria found for field: {field_label}"}), 404
+    
+    criteria_for_field = ATS_VALIDATION_CRITERIA_DB[field_label]
+    for i, crit in enumerate(criteria_for_field):
+        if crit["id"] == criterion_id:
+            # Update existing criterion, but don't change its ID or field_label
+            crit.update({k:v for k,v in data.items() if k not in ['id', 'field_label']})
+            ATS_VALIDATION_CRITERIA_DB[field_label][i] = crit # Ensure update
+            print(f"Admin updated ATS criterion {criterion_id} for {field_label}: {crit}")
+            return jsonify({"message": "ATS criterion updated.", "criterion": crit}), 200
+    return jsonify({"error": "Criterion ID not found for the specified field."}), 404
+
+@app.route('/api/admin/ats_criteria/<string:field_label>/<string:criterion_id>', methods=['DELETE'])
+@admin_required
+def api_delete_ats_criterion(field_label, criterion_id):
+    if field_label not in ATS_VALIDATION_CRITERIA_DB:
+        return jsonify({"error": f"No criteria found for field: {field_label}"}), 404
+    
+    original_length = len(ATS_VALIDATION_CRITERIA_DB[field_label])
+    ATS_VALIDATION_CRITERIA_DB[field_label] = [c for c in ATS_VALIDATION_CRITERIA_DB[field_label] if c["id"] != criterion_id]
+    
+    if len(ATS_VALIDATION_CRITERIA_DB[field_label]) == original_length:
+        return jsonify({"error": "Criterion ID not found for deletion."}), 404
+    
+    # If the list for this field_label becomes empty, remove the key
+    if not ATS_VALIDATION_CRITERIA_DB[field_label]:
+        del ATS_VALIDATION_CRITERIA_DB[field_label]
+        
+    print(f"Admin deleted ATS criterion {criterion_id} for {field_label}")
+    return jsonify({"message": "ATS criterion deleted."}), 200
+
+# --- Admin User Management APIs (Simpler version - just role for now) ---
+@app.route('/api/admin/manage_users', methods=['GET']) # Renamed for clarity
+@admin_required
+def api_manage_get_users():
+    user_list = [{"email": email, "username": data.get("username"), "role": data.get("role")} for email, data in USERS_DB.items() if data.get("role") != 'admin'] # Don't list admin itself for modification
+    return jsonify(user_list)
+
+@app.route('/api/admin/manage_users', methods=['POST'])
+@admin_required
+def api_manage_add_user():
+    data = request.json
+    email, username, password, role = data.get('email'), data.get('username'), data.get('password'), data.get('role')
+    if not all([email, username, password, role]): return jsonify({"error": "All fields required"}), 400
+    if email in USERS_DB: return jsonify({"error": "Email already exists"}), 409
+    if role not in ["sub_admin", "po_verifier", "ats_verifier"]: return jsonify({"error": "Invalid role"}), 400
+
+    USERS_DB[email] = {
+        "username": username,
+        "hashed_password": generate_password_hash(password),
+        "role": role
+    }
+    print(f"Admin added user {username} ({email}) with role {role}")
+    return jsonify({"message": "User created successfully", "user": {"email": email, "username": username, "role": role}}), 201
+
+@app.route('/api/admin/manage_users/<string:user_email>', methods=['PUT'])
+@admin_required
+def api_manage_update_user(user_email):
+    if user_email not in USERS_DB or USERS_DB[user_email].get("role") == 'admin':
+        return jsonify({"error": "User not found or cannot modify admin"}), 404
+    data = request.json
+    new_username = data.get('username')
+    new_role = data.get('role')
+
+    if new_username: USERS_DB[user_email]['username'] = new_username
+    if new_role and new_role in ["sub_admin", "po_verifier", "ats_verifier"]:
+        USERS_DB[user_email]['role'] = new_role
+    elif new_role: return jsonify({"error": "Invalid role"}), 400
+    
+    # Password reset via different endpoint or separate field
+    new_password = data.get('password') # If admin can set password directly
+    if new_password:
+        USERS_DB[user_email]['hashed_password'] = generate_password_hash(new_password)
+        print(f"Admin updated password for {user_email}")
+
+    print(f"Admin updated user {user_email}")
+    return jsonify({"message": "User updated", "user": {"email": user_email, "username": USERS_DB[user_email]['username'], "role": USERS_DB[user_email]['role']}}), 200
+
+@app.route('/api/admin/manage_users/<string:user_email>', methods=['DELETE'])
+@admin_required
+def api_manage_delete_user(user_email):
+    if user_email not in USERS_DB or USERS_DB[user_email].get("role") == 'admin':
+        return jsonify({"error": "User not found or cannot delete admin"}), 404
+    del USERS_DB[user_email]
+    print(f"Admin deleted user {user_email}")
+    return jsonify({"message": "User deleted"}), 200
+
+
+# --- PDF Report Generation (Placeholder) ---
+def generate_pdf_report_content(results_for_file, doc_type, filename):
+    """Helper to create content for PDF report using ReportLab."""
+    styles = getSampleStyleSheet()
+    story = []
+    story.append(Paragraph(f"Verification Report for: {filename}", styles['h1']))
+    story.append(Paragraph(f"Document Type: {doc_type.upper()}", styles['h2']))
+    story.append(Spacer(1, 12))
+
+    if results_for_file.get("error"):
+        story.append(Paragraph(f"Processing Error: {results_for_file['error']}", styles['BodyText']))
+        return story
+
+    story.append(Paragraph("Extracted Text:", styles['h3']))
+    # Truncate very long extracted text for PDF or handle overflow carefully
+    extracted_text_display = (results_for_file.get('extracted_text', 'N/A')[:2000] + '...') if len(results_for_file.get('extracted_text', '')) > 2000 else results_for_file.get('extracted_text', 'N/A')
+    story.append(Paragraph(extracted_text_display.replace('\n', '<br/>'), styles['Code'])) # Use Code style for pre-like formatting
+    story.append(Spacer(1, 12))
+
+    story.append(Paragraph("Extracted Structured Data:", styles['h3']))
+    if results_for_file.get("structured_data"):
+        s_data = [["Field", "Value"]]
+        for k, v in results_for_file["structured_data"].items():
+            s_data.append([Paragraph(str(k), styles['BodyText']), Paragraph(str(v if v is not None else 'N/A'), styles['BodyText'])])
+        if len(s_data) > 1: story.append(Table(s_data, colWidths=[150, '*']))
+        else: story.append(Paragraph("No structured data extracted/available.", styles['BodyText']))
+    else: story.append(Paragraph("No structured data extracted.", styles['BodyText']))
+    story.append(Spacer(1, 12))
+
+    story.append(Paragraph("Comparison/Validation Summary:", styles['h3']))
+    if "accuracy" in results_for_file:
+        story.append(Paragraph(f"Accuracy: {results_for_file['accuracy']:.1f}%", styles['BodyText']))
+        if results_for_file.get("compared_fields_list"):
+            story.append(Paragraph(f"(Based on: {', '.join(results_for_file['compared_fields_list'])})", styles['Italic']))
+
+    if results_for_file.get("comparison_error"):
+        story.append(Paragraph(f"Comparison Note: {results_for_file['comparison_error']}", styles['BodyText']))
+    
+    if results_for_file.get("mismatched_fields"):
+        story.append(Paragraph("Mismatched/Failed Criteria Fields:", styles['h4']))
+        m_data = [["Field", "Extracted/Details", "Expected/DB (if applicable)"]]
+        for field, details in results_for_file["mismatched_fields"].items():
+            if isinstance(details, dict): # PO mismatch
+                 m_data.append([field, str(details.get("extracted_value", "N/A")), str(details.get("db_value", "N/A"))])
+            else: # ATS failed criteria string
+                m_data.append([field, str(details), "N/A (Rule Based)"])
+        if len(m_data) > 1:
+            t = Table(m_data, colWidths=[150, '*', 150])
+            t.setStyle(TableStyle([('BACKGROUND', (0,0), (-1,0), colors.grey), ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke)]))
+            story.append(t)
+        else: story.append(Paragraph("No mismatches or failed criteria.", styles['BodyText']))
+    return story
+
+
+@app.route('/download_report/<string:doc_type>/<string:filename_key>')
+@login_required # Ensure user is logged in
+def download_report(doc_type, filename_key):
+    # This is a simplified way to get results; in a real app, results might be stored or passed differently
+    # For now, this won't work directly as 'results' is local to app_dashboard
+    # We would need to re-process or fetch stored results.
+    # This is a placeholder - actual implementation requires result persistence or re-processing.
+    
+    # ---- For demonstration, let's assume results are in session (NOT scalable) ----
+    # ---- This is a BAD idea for production due to session size limits ----
+    session_results = session.get('last_processed_results', {})
+    results_for_file = session_results.get(filename_key)
+
+    if not results_for_file:
+        flash("Report data not found or expired. Please re-process the document.", "warning")
+        return redirect(url_for('app_dashboard'))
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    story = generate_pdf_report_content(results_for_file, doc_type, filename_key)
+    doc.build(story)
+    buffer.seek(0)
+
+    return Response(
+        buffer,
+        mimetype='application/pdf',
+        headers={'Content-Disposition': f'attachment;filename=report_{doc_type}_{filename_key.split("_")[0]}.pdf'}
+    )
+
+
+# --- Main Execution ---
+if __name__ == '__main__':
+    print("-" * 60 + "\nFlask App Starting...")
+    # (Startup messages as before)
+    print(f"SECRET_KEY Loaded: {'Yes' if app.secret_key != secrets.token_hex(16) else 'No (Using Temporary)'}")
+    print(f"OCR_SPACE_API_KEY Loaded: {'Yes' if OCR_SPACE_API_KEY != 'K87955728688957' else 'No (Using Placeholder)'}")
+    print("Available Tabs:", list(AVAILABLE_TABS.keys()))
+    print("WARNING: All data (Users, PO DB, ATS Criteria, Resumes) stored IN-MEMORY and will be LOST on restart.")
+    print("-" * 60)
+    app.run(debug=True, host='0.0.0.0', port=5000)
+```
+
+---
+
+**2. `admin_dashboard.html` (Updated for New Admin Sections)**
+
+This matches the structure you provided, with JS adapted for the new PO data entry and ATS criteria management.
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin Console - Verification App</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+    /* Using the styles from your provided admin_dashboard.html */
+    body { background-color: #f8f9fa; font-family: 'Roboto', sans-serif; color: #343a40; }
+    .sidebar { background-color: #ffffff; height: 100vh; padding: 1.5rem 1rem; border-right: 1px solid #dee2e6; position: fixed; width: 250px; overflow-y: auto; box-shadow: 2px 0 5px rgba(0,0,0,0.05); z-index: 1000; }
+    .sidebar .logo { display: block; margin: 0 auto 1.5rem auto; text-align: center; }
+    .sidebar a { display: flex; align-items: center; padding: 0.8rem 1rem; margin-bottom: 0.5rem; color: #495057; text-decoration: none; border-radius: 8px; font-weight: 500; transition: background-color 0.2s ease-in-out, color 0.2s ease-in-out; }
+    .sidebar a:hover { background-color: #e9ecef; color: #007bff; }
+    .sidebar a.active { background-color: #007BFF; color: white; font-weight: bold; }
+    .sidebar a i { margin-right: 0.8rem; font-size: 1.1rem; width: 20px; text-align: center; }
+    .dashboard-content { margin-left: 260px; padding: 2rem; }
+    .content-section { padding: 25px; background-color: #ffffff; margin-bottom: 25px; border-radius: 8px; box-shadow: 0 0.2rem 0.5rem rgba(0,0,0,0.075); border: 1px solid #dee2e6; }
+    .content-section h2 { color: #0056b3; margin-bottom: 0.5rem; display: flex; align-items: center; }
+    .content-section h2 i { margin-right: 0.6rem; }
+    .content-section hr { margin-top: 0.5rem; margin-bottom: 1.5rem; border-top: 1px solid #dee2e6; }
+    .card { border: 1px solid #e0e0e0; border-radius: 8px; box-shadow: none; }
+    .card h5 { color: #0056b3; }
+    .navbar { background-color: #ffffff !important; border-bottom: 1px solid #dee2e6; box-shadow: 0 2px 4px rgba(0,0,0,0.04); }
+    .dashboard-content .navbar { margin-bottom: 2rem; border-radius: 8px; }
+    .modal-header { background-color: #f8f9fa; border-bottom: 1px solid #dee2e6; }
+    .modal-title { color: #0056b3; }
+    .table thead th { background-color: #e9ecef; color: #495057; font-weight: 600; border-bottom: 2px solid #dee2e6; }
+    .table-hover > tbody > tr:hover { background-color: #f1f3f5; }
+    .content-section:not(#dashboard-section) { display: none; }
+    #extraction-fields-list .form-check { padding: 0.6rem 0.8rem; border-bottom: 1px solid #eee; position: relative; }
+    #extraction-fields-list .form-check:last-child { border-bottom: none; }
+    #extraction-fields-list .form-check-label { font-weight: 500; }
+    .field-description-modal { font-size: 0.8rem; color: #6c757d; font-weight: normal; display: block; margin-top: 0.2rem; }
+    .extraction-input-group { margin-bottom: 1rem; }
+    .extraction-input-group label { font-weight: 500; color: #495057; }
+    .extraction-input-group .form-text { font-size: 0.8rem; }
+    .column-title-main { font-size: 1.3rem; color: #495057; margin-bottom: 0.5rem; padding-bottom: 0.5rem; border-bottom: 2px solid #007bff; display: inline-block;}
+    .column-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap;} /* Adjusted margin */
+    .btn-configure-extraction { font-size: 0.85rem; }
+    #atsCriteriaTable th, #atsCriteriaTable td { vertical-align: middle; }
+</style>
+</head>
+<body>
+<div class="sidebar">
+    <div class="logo">
+         <img src="{{ url_for('static', filename='Group 1000008859.png') }}" alt="Logo" height="45" class="mb-3">
+    </div>
+    <a href="#dashboard" class="nav-link active" data-target="dashboard-section" id="nav-dashboard"><i class="bi bi-speedometer2"></i> Dashboard</a>
+    <a href="#users" class="nav-link" data-target="users-section" id="nav-users"><i class="bi bi-people-fill"></i>Manage Users</a>
+    <a href="#add_po_data" class="nav-link" data-target="add_po_data-section" id="nav-add_po_data"><i class="bi bi-database-add"></i>Add PO Data</a>
+    <a href="#manage_ats_criteria" class="nav-link" data-target="manage_ats_criteria-section" id="nav-manage_ats_criteria"><i class="bi bi-ui-checks-grid"></i>Manage ATS Criteria</a>
+    <a href="{{ url_for('logout') }}"><i class="bi bi-box-arrow-right"></i> Logout</a>
+</div>
+
+<div class="dashboard-content">
+    <nav class="navbar navbar-expand-lg navbar-light bg-light">
+        <div class="container-fluid">
+            <a class="navbar-brand ms-2" href="#">Admin Console</a>
+            <span class="navbar-text ms-auto me-2">Welcome, {{ session.get('username', 'Admin') }}!</span>
+        </div>
+    </nav>
+    <div id="flash-message-container" class="mb-3"> {% include '_flash_messages.html' %} </div>
+
+    <section id="dashboard-section" class="content-section active">
+        <h2><i class="bi bi-speedometer2"></i> Dashboard</h2><hr>
+        <div class="row"><div class="col-md-6 mb-3"><div class="card text-center h-100"><div class="card-body d-flex flex-column justify-content-between"><div><h5 class="card-title"><i class="bi bi-people-fill me-2"></i> Managed Users</h5><p class="card-text display-4 fw-bold text-primary" id="user-count-display">0</p></div><button class="btn btn-outline-primary mt-3" data-target="users-section">Manage Users <i class="bi bi-arrow-right-short"></i></button></div></div></div><div class="col-md-6 mb-3"><div class="card text-center h-100"><div class="card-body d-flex flex-column justify-content-between"><div><h5 class="card-title"><i class="bi bi-database-check me-2"></i> PO DB Entries</h5><p class="card-text display-4 fw-bold text-primary" id="po-db-count-display">0</p></div><button class="btn btn-outline-primary mt-3" data-target="add_po_data-section">Add PO Data <i class="bi bi-arrow-right-short"></i></button></div></div></div></div>
+        <div class="row mt-3"><div class="col-md-6 mb-3"><div class="card text-center h-100"><div class="card-body d-flex flex-column justify-content-between"><div><h5 class="card-title"><i class="bi bi-card-checklist me-2"></i> ATS Criteria Defined</h5><p class="card-text display-4 fw-bold text-primary" id="ats-criteria-count-display">0</p></div><button class="btn btn-outline-primary mt-3" data-target="manage_ats_criteria-section">Manage ATS Criteria <i class="bi bi-arrow-right-short"></i></button></div></div></div></div>
+    </section>
+
+    <section id="users-section" class="content-section">
+        <div class="d-flex justify-content-between align-items-center"><h2><i class="bi bi-people-fill"></i> Manage Users</h2><button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createUserModal"><i class="bi bi-plus-circle me-1"></i> Create User</button></div><hr>
+        <div class="table-responsive"><table class="table table-striped table-hover align-middle"><thead><tr><th>Username</th><th>Email</th><th>Role</th><th class="text-center">Actions</th></tr></thead><tbody id="user-table-body"></tbody></table></div>
+        <p id="no-users-message" class="text-muted mt-3" style="display: none;">No users found.</p>
+    </section>
+
+    <section id="add_po_data-section" class="content-section">
+        <div class="column-header">
+            <h2 class="column-title-main"><i class="bi bi-file-earmark-text text-info"></i> Add/Update PO Data in Database</h2>
+            <button type="button" class="btn btn-outline-primary btn-configure-extraction" data-bs-toggle="modal" data-bs-target="#configureFieldsModal" data-config-type="po"><i class="bi bi-gear"></i> Configure PO Fields for Entry</button>
+        </div>
+        <form id="poDataEntryForm">
+            <div id="po-data-entry-fields-list" class="mt-3 row">
+                <p class="text-muted col-12" id="po-data-entry-placeholder">Configure PO fields to start entering data.</p>
+            </div>
+            <div class="mt-3 d-flex justify-content-end" id="savePODataContainer" style="display:none;">
+                <button type="submit" class="btn btn-success"><i class="bi bi-save"></i> Save PO Data</button>
+            </div>
+        </form>
+    </section>
+
+    <section id="manage_ats_criteria-section" class="content-section">
+        <div class="d-flex justify-content-between align-items-center"><h2><i class="bi bi-ui-checks-grid"></i> Manage ATS Validation Criteria</h2><button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addEditAtsCriterionModal" id="openAddAtsCriterionModal"><i class="bi bi-plus-circle"></i> Add New Criterion</button></div><hr>
+        <div id="ats-criteria-config-header" class="column-header mb-3">
+             <h3 class="column-title-main" style="border:none; margin-bottom:0;"><i class="bi bi-person-lines-fill text-success"></i> Configurable ATS Fields</h3>
+            <button type="button" class="btn btn-outline-success btn-configure-extraction" data-bs-toggle="modal" data-bs-target="#configureFieldsModal" data-config-type="ats"><i class="bi bi-gear"></i> Configure ATS Fields for Criteria</button>
+        </div>
+        <p id="no-ats-fields-for-criteria-msg" class="text-muted" style="display:none;">Please configure ATS fields to be able to set criteria for them.</p>
+        <div class="table-responsive mt-3">
+            <table class="table table-hover">
+                <thead><tr><th>Field Label</th><th>Condition</th><th>Value(s)</th><th>Active</th><th class="text-center">Actions</th></tr></thead>
+                <tbody id="atsCriteriaTableBody"><tr id="no-ats-criteria-row"><td colspan="5" class="text-center text-muted">No ATS criteria defined.</td></tr></tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- MODALS -->
+    <!-- Create User Modal -->
+    <div class="modal fade" id="createUserModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title"><i class="bi bi-person-plus-fill me-2"></i>Create User</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body"><div class="alert alert-danger d-none" id="createUserFormAlert"></div><form id="createUserForm_inner" novalidate>
+            <div class="mb-3"><label for="newUsername" class="form-label">Username*</label><input type="text" class="form-control" id="newUsername" required></div>
+            <div class="mb-3"><label for="newUserEmail" class="form-label">Email*</label><input type="email" class="form-control" id="newUserEmail" required></div>
+            <div class="mb-3"><label for="newUserPassword" class="form-label">Password*</label><input type="password" class="form-control" id="newUserPassword" required></div>
+            <div class="mb-3"><label class="form-label">Role*</label><div id="roleSelectFeedback" class="text-danger small d-none">Select a role.</div>
+                <div class="form-check"><input class="form-check-input" type="radio" name="userRole" id="roleSubAdmin" value="sub_admin" required><label class="form-check-label" for="roleSubAdmin">Sub-Admin (PO & ATS)</label></div>
+                <div class="form-check"><input class="form-check-input" type="radio" name="userRole" id="rolePO" value="po_verifier"><label class="form-check-label" for="rolePO">PO Verifier</label></div>
+                <div class="form-check"><input class="form-check-input" type="radio" name="userRole" id="roleATS" value="ats_verifier"><label class="form-check-label" for="roleATS">ATS Verifier</label></div>
+            </div></form></div>
+        <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button type="submit" class="btn btn-primary" form="createUserForm_inner" id="submitCreateUserBtn"><span class="spinner-border spinner-border-sm d-none me-1"></span>Create</button></div>
+    </div></div></div>
+
+    <!-- Configure Fields Modal (Generic for PO Entry Fields / ATS Criteria Fields) -->
+    <div class="modal fade" id="configureFieldsModal" tabindex="-1"><div class="modal-dialog modal-dialog-scrollable modal-lg"><div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title" id="configureFieldsModalLabel"><i class="bi bi-gear-fill me-2"></i>Configure Fields</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body">
+            <input type="hidden" id="currentConfigType"> <!-- 'po' or 'ats' -->
+            <div id="master-fields-checkbox-list" style="max-height: 400px; overflow-y: auto;">
+                <p class="text-center text-muted">Loading fields...</p>
+            </div>
+        </div>
+        <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button><button type="button" class="btn btn-primary" id="saveFieldConfigurationBtn">Save Configuration</button></div>
+    </div></div></div>
+
+    <!-- Add/Edit ATS Criterion Modal -->
+    <div class="modal fade" id="addEditAtsCriterionModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title" id="atsCriterionModalLabel">Add ATS Criterion</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body">
+            <div class="alert alert-danger d-none" id="atsCriterionFormAlert"></div>
+            <form id="atsCriterionForm" novalidate>
+                <input type="hidden" id="atsCriterionId">
+                <div class="mb-3"><label for="atsCriterionFieldLabel" class="form-label">Field Name*</label><select class="form-select" id="atsCriterionFieldLabel" required><option value="" selected disabled>-- Select ATS Field --</option></select><div class="invalid-feedback">Select field.</div></div>
+                <div class="mb-3"><label for="atsCriterionConditionType" class="form-label">Condition Type*</label><select class="form-select" id="atsCriterionConditionType" required><option value="range_numeric">Numeric Range (Min/Max)</option><option value="contains_any">Contains Any Keyword(s)</option><!-- Add more --></select><div class="invalid-feedback">Select condition.</div></div>
+                <div id="atsCriterionValuesContainer" class="mb-3"> <!-- Dynamically populated --> </div>
+                <div class="form-check mb-3"><input class="form-check-input" type="checkbox" id="atsCriterionIsActive" checked><label class="form-check-label" for="atsCriterionIsActive">Active</label></div>
+            </form>
+        </div>
+        <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button type="submit" class="btn btn-primary" form="atsCriterionForm" id="saveAtsCriterionBtn"><span class="spinner-border spinner-border-sm d-none me-1"></span>Save</button></div>
+    </div></div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+    // Passed from Flask: all possible fields admin can configure for PO entry or ATS criteria
+    const ADMIN_CONFIGURABLE_FIELDS_PY = JSON.parse('{{ predefined_fields_json | tojson | safe }}');
+</script>
+<script>
+// --- Admin Panel JavaScript (Simplified & Adapted) ---
+document.addEventListener('DOMContentLoaded', () => {
+    // Elements (condensed for brevity, ensure all relevant ones are grabbed)
+    const navLinks = document.querySelectorAll('.sidebar .nav-link');
+    const contentSections = document.querySelectorAll('.dashboard-content > .content-section');
+    const userTableBody = document.getElementById('user-table-body');
+    // PO Data Entry Elements
+    const poDataEntryFieldsList = document.getElementById('po-data-entry-fields-list');
+    const poDataEntryPlaceholder = document.getElementById('po-data-entry-placeholder');
+    const poDataEntryForm = document.getElementById('poDataEntryForm');
+    const savePODataContainer = document.getElementById('savePODataContainer');
+    // ATS Criteria Elements
+    const atsCriteriaTableBody = document.getElementById('atsCriteriaTableBody');
+    const noAtsCriteriaRow = document.getElementById('no-ats-criteria-row');
+    const openAddAtsCriterionModalBtn = document.getElementById('openAddAtsCriterionModal');
+    const atsCriterionModalEl = document.getElementById('addEditAtsCriterionModal');
+    const atsCriterionModalInstance = atsCriterionModalEl ? bootstrap.Modal.getOrCreateInstance(atsCriterionModalEl) : null;
+    const atsCriterionModalLabel = document.getElementById('atsCriterionModalLabel');
+    const atsCriterionForm = document.getElementById('atsCriterionForm');
+    const atsCriterionIdInput = document.getElementById('atsCriterionId');
+    const atsCriterionFieldLabelSelect = document.getElementById('atsCriterionFieldLabel');
+    const atsCriterionConditionTypeSelect = document.getElementById('atsCriterionConditionType');
+    const atsCriterionValuesContainer = document.getElementById('atsCriterionValuesContainer');
+    const atsCriterionIsActiveCheckbox = document.getElementById('atsCriterionIsActive');
+    const atsCriterionFormAlert = document.getElementById('atsCriterionFormAlert');
+    const saveAtsCriterionBtn = document.getElementById('saveAtsCriterionBtn');
+    const noAtsFieldsForCriteriaMsg = document.getElementById('no-ats-fields-for-criteria-msg');
+
+
+    // Configure Fields Modal Elements
+    const configureFieldsModalEl = document.getElementById('configureFieldsModal');
+    const configureFieldsModalInstance = configureFieldsModalEl ? bootstrap.Modal.getOrCreateInstance(configureFieldsModalEl) : null;
+    const configureFieldsModalLabel = document.getElementById('configureFieldsModalLabel');
+    const currentConfigTypeInput = document.getElementById('currentConfigType');
+    const masterFieldsCheckboxList = document.getElementById('master-fields-checkbox-list');
+    const saveFieldConfigurationBtn = document.getElementById('saveFieldConfigurationBtn');
+
+    // User Management Elements
+    const createUserModalEl = document.getElementById('createUserModal');
+    const createUserModalInstance = createUserModalEl ? bootstrap.Modal.getOrCreateInstance(createUserModalEl) : null;
+    const createUserFormInner = document.getElementById('createUserForm_inner'); // Form inside modal
+    const createUserFormAlert = document.getElementById('createUserFormAlert');
+    const roleSelectFeedback = document.getElementById('roleSelectFeedback');
+    const submitCreateUserBtn = document.getElementById('submitCreateUserBtn');
+
+
+    // State for admin configurations
+    let adminConfiguredFields = { // Fields admin has chosen to work with
+        po: [], // list of field labels
+        ats: []  // list of field labels
+    };
+
+    // Helper Functions (escapeHTML, showAlert, hideAlert, toggleButtonSpinner - keep these)
+    function escapeHTML(str) { /* ... */ }
+    function showAlert(el, msg, type = 'danger') { /* ... */ }
+    function hideAlert(el) { /* ... */ }
+    function toggleButtonSpinner(btn, show) { /* ... */ }
+    // (Ensure these helpers are defined as in previous full versions)
+    function escapeHTML(str) { if (str === null || typeof str === 'undefined') return ''; const div = document.createElement('div'); div.textContent = str; return div.innerHTML; }
+    function showAlert(alertElement, message, type = 'danger') { if (!alertElement) return; alertElement.className = `alert alert-${type} mb-3`; alertElement.innerHTML = escapeHTML(message); alertElement.classList.remove('d-none'); }
+    function hideAlert(alertElement) { if (!alertElement) return; alertElement.classList.add('d-none'); alertElement.innerHTML = ''; }
+    function toggleButtonSpinner(button, showSpinner) { if (!button) return; const spinner = button.querySelector('.spinner-border'), icon = button.querySelector('i'); if (!spinner && showSpinner) { button.insertAdjacentHTML('afterbegin', '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>'); } else if (spinner) { spinner.classList.toggle('d-none', !showSpinner); } if (icon) icon.classList.toggle('d-none', showSpinner); button.disabled = showSpinner; }
+
+
+    // Navigation
+    function showSection(targetId) {
+        navLinks.forEach(l => l.classList.remove('active'));
+        contentSections.forEach(s => s.style.display = 'none');
+        const targetSection = document.getElementById(targetId);
+        const targetNavLink = document.querySelector(`.sidebar a[data-target="${targetId}"]`);
+        if (targetSection) targetSection.style.display = 'block';
+        if (targetNavLink) targetNavLink.classList.add('active');
+
+        if (targetId === 'users-section') loadAdminUsers();
+        if (targetId === 'add_po_data-section') renderPODataEntryFields();
+        if (targetId === 'manage_ats_criteria-section') { renderATSFieldsForCriteriaConfig(); loadATSCriteria(); }
+        updateDashboardCounts();
+    }
+    navLinks.forEach(link => link.addEventListener('click', (e) => { e.preventDefault(); showSection(link.dataset.target); }));
+    document.querySelectorAll('.card button[data-target]').forEach(b => b.addEventListener('click', () => showSection(b.dataset.target)));
+
+
+    // --- User Management (Simplified) ---
+    async function loadAdminUsers() {
+        // Fetch users from /api/admin/manage_users (GET) and populate table
+        // Add event listeners for Edit/Delete buttons on each row
+        // Edit opens a modal to change username, role (radio), password (optional new field)
+        // Delete calls /api/admin/manage_users/<email> (DELETE)
+        if (!userTableBody) return;
+        userTableBody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">Loading...</td></tr>';
+        try {
+            const response = await fetch('/api/admin/manage_users');
+            if(!response.ok) throw new Error("Failed to load users");
+            const users = await response.json();
+            userTableBody.innerHTML = '';
+            if (users.length > 0) {
+                users.forEach(user => {
+                    const row = userTableBody.insertRow();
+                    row.insertCell().textContent = user.username;
+                    row.insertCell().textContent = user.email;
+                    row.insertCell().textContent = user.role.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase());
+                    row.insertCell().innerHTML = `<button class="btn btn-sm btn-outline-secondary me-1 btn-edit-user-admin" data-email="${user.email}" title="Edit (Placeholder)"><i class="bi bi-pencil"></i></button><button class="btn btn-sm btn-outline-danger btn-delete-user-admin" data-email="${user.email}" title="Delete"><i class="bi bi-trash"></i></button>`;
+                });
+            } else {
+                userTableBody.innerHTML = '<tr><td colspan="4" class="text-center text-muted">No users found.</td></tr>';
+            }
+            updateDashboardCounts();
+        } catch (error) {
+            userTableBody.innerHTML = '<tr><td colspan="4" class="text-center text-danger">Error loading users.</td></tr>';
+            console.error("Load users error:", error);
+        }
+    }
+    if (createUserFormInner) createUserFormInner.addEventListener('submit', async function(event) {
+        event.preventDefault(); event.stopPropagation();
+        hideAlert(createUserFormAlert); hideAlert(roleSelectFeedback);
+        if (!this.checkValidity() || !document.querySelector('input[name="userRole"]:checked')) {
+            this.classList.add('was-validated');
+            if(!document.querySelector('input[name="userRole"]:checked')) roleSelectFeedback.classList.remove('d-none');
+            return;
+        }
+        this.classList.remove('was-validated');
+        const payload = {
+            username: document.getElementById('newUsername').value,
+            email: document.getElementById('newUserEmail').value,
+            password: document.getElementById('newUserPassword').value,
+            role: document.querySelector('input[name="userRole"]:checked').value
+        };
+        toggleButtonSpinner(submitCreateUserBtn, true);
+        try {
+            const response = await fetch('/api/admin/manage_users', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.error || "Failed to create user.");
+            loadAdminUsers();
+            if(createUserModalInstance) createUserModalInstance.hide();
+            showFlashMessage(result.message, 'success');
+        } catch (error) { showAlert(createUserFormAlert, error.message);
+        } finally { toggleButtonSpinner(submitCreateUserBtn, false); }
+    });
+    if (userTableBody) userTableBody.addEventListener('click', async (event) => { // Simplified delete
+        if (event.target.closest('.btn-delete-user-admin')) {
+            const email = event.target.closest('.btn-delete-user-admin').dataset.email;
+            if (confirm(`Delete user ${email}?`)) {
+                // Call DELETE /api/admin/manage_users/<email>
+                try {
+                    const response = await fetch(`/api/admin/manage_users/${email}`, {method: 'DELETE'});
+                    const result = await response.json();
+                    if(!response.ok) throw new Error(result.error || "Delete failed");
+                    loadAdminUsers(); showFlashMessage(result.message, 'success');
+                } catch (error) { showFlashMessage(`Error: ${error.message}`, 'danger');}
+            }
+        }
+        // Add Edit User functionality here - similar pattern, open modal, prefill, PUT request
+    });
+     if(createUserModalEl) createUserModalEl.addEventListener('hidden.bs.modal', () => {
+        if(createUserFormInner) { createUserFormInner.reset(); createUserFormInner.classList.remove('was-validated'); }
+        hideAlert(createUserFormAlert); hideAlert(roleSelectFeedback);
+    });
+
+
+    // --- Configure Fields Modal Logic ---
+    document.querySelectorAll('.btn-configure-extraction').forEach(button => {
+        button.addEventListener('click', function() {
+            const configType = this.dataset.configType; // 'po' or 'ats'
+            currentConfigTypeInput.value = configType;
+            configureFieldsModalLabel.textContent = `Configure ${configType.toUpperCase()} Fields`;
+            masterFieldsCheckboxList.innerHTML = ''; // Clear previous
+            const fieldsForType = ADMIN_CONFIGURABLE_FIELDS_PY[configType] || [];
+            const currentlyConfigured = adminConfiguredFields[configType] || [];
+
+            if (fieldsForType.length === 0) {
+                masterFieldsCheckboxList.innerHTML = '<p class="text-muted">No predefined fields available for this type.</p>'; return;
+            }
+            fieldsForType.forEach(field => {
+                const isChecked = currentlyConfigured.includes(field.label); // Check against label
+                masterFieldsCheckboxList.insertAdjacentHTML('beforeend', `
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" value="${field.label}" id="cfg-field-${field.id}" ${isChecked ? 'checked' : ''}>
+                        <label class="form-check-label" for="cfg-field-${field.id}">
+                            ${escapeHTML(field.label)}
+                            <div class="field-description-modal">${escapeHTML(field.description)}</div>
+                        </label>
+                    </div>`);
+            });
+        });
+    });
+
+    if (saveFieldConfigurationBtn) saveFieldConfigurationBtn.addEventListener('click', () => {
+        const type = currentConfigTypeInput.value;
+        const selectedLabels = [];
+        masterFieldsCheckboxList.querySelectorAll('input[type="checkbox"]:checked').forEach(cb => {
+            selectedLabels.push(cb.value);
+        });
+        adminConfiguredFields[type] = selectedLabels;
+        if (configureFieldsModalInstance) configureFieldsModalInstance.hide();
+        showFlashMessage(`${type.toUpperCase()} field configuration saved.`, 'success');
+        if (type === 'po') renderPODataEntryFields();
+        if (type === 'ats') renderATSFieldsForCriteriaConfig(); // Update criteria field dropdown
+        updateDashboardCounts();
+    });
+
+    // --- "Add PO Data to Database" Section Logic ---
+    function renderPODataEntryFields() {
+        if (!poDataEntryFieldsList || !poDataEntryPlaceholder || !savePODataContainer) return;
+        poDataEntryFieldsList.innerHTML = '';
+        const poFieldsToEnter = adminConfiguredFields.po || [];
+        if (poFieldsToEnter.length === 0) {
+            poDataEntryPlaceholder.style.display = 'block';
+            savePODataContainer.style.display = 'none';
+            return;
+        }
+        poDataEntryPlaceholder.style.display = 'none';
+        savePODataContainer.style.display = 'flex';
+        poFieldsToEnter.forEach(label => {
+            const fieldDef = ADMIN_CONFIGURABLE_FIELDS_PY.po.find(f => f.label === label);
+            const inputId = `po-entry-${fieldDef ? fieldDef.id : label.replace(/\s+/g, '-')}`;
+            poDataEntryFieldsList.insertAdjacentHTML('beforeend', `
+                <div class="col-md-6 extraction-input-group">
+                    <label for="${inputId}" class="form-label">${escapeHTML(label)}</label>
+                    <input type="text" class="form-control form-control-sm" id="${inputId}" name="${label}" placeholder="Enter ${escapeHTML(label)}">
+                </div>`);
+        });
+    }
+    if (poDataEntryForm) poDataEntryForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const formData = new FormData(poDataEntryForm);
+        const poData = {};
+        let poNumberProvided = false;
+        for (let [key, value] of formData.entries()) {
+            poData[key] = value.trim();
+            if (key === "PO Number" && value.trim()) poNumberProvided = true;
+        }
+        if (!poNumberProvided) { alert("PO Number is required to save the entry."); return; }
+
+        toggleButtonSpinner(poDataEntryForm.querySelector('button[type="submit"]'), true); // Assuming button is inside form
+        try {
+            const response = await fetch('/api/admin/po_database_entry', {
+                method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(poData)
+            });
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.error || "Failed to save PO data.");
+            showFlashMessage(result.message, 'success');
+            poDataEntryForm.reset(); // Clear form
+            updateDashboardCounts(); // Update PO DB count
+        } catch (error) { alert(`Error: ${error.message}`);
+        } finally { toggleButtonSpinner(poDataEntryForm.querySelector('button[type="submit"]'), false); }
+    });
+
+
+    // --- "Manage ATS Criteria" Section Logic ---
+    function renderATSFieldsForCriteriaConfig() { // Populates dropdown in "Add Criterion" modal
+        if (!atsCriterionFieldLabelSelect || !noAtsFieldsForCriteriaMsg) return;
+        atsCriterionFieldLabelSelect.innerHTML = '<option value="" selected disabled>-- Select ATS Field --</option>';
+        const atsFieldsForCriteria = adminConfiguredFields.ats || [];
+        if (atsFieldsForCriteria.length === 0) {
+            noAtsFieldsForCriteriaMsg.style.display = 'block';
+            if(openAddAtsCriterionModalBtn) openAddAtsCriterionModalBtn.disabled = true; // Disable adding if no fields
+            return;
+        }
+        noAtsFieldsForCriteriaMsg.style.display = 'none';
+        if(openAddAtsCriterionModalBtn) openAddAtsCriterionModalBtn.disabled = false;
+        atsFieldsForCriteria.forEach(label => {
+            const fieldDef = ADMIN_CONFIGURABLE_FIELDS_PY.ats.find(f => f.label === label);
+            if (fieldDef) { // Ensure field definition exists
+                atsCriterionFieldLabelSelect.insertAdjacentHTML('beforeend', `<option value="${escapeHTML(label)}">${escapeHTML(label)} (ID: ${fieldDef.id})</option>`);
+            }
+        });
+    }
+
+    async function loadATSCriteria() {
+        if (!atsCriteriaTableBody || !noAtsCriteriaRow) return;
+        atsCriteriaTableBody.innerHTML = '<tr><td colspan="5" class="text-center text-muted">Loading criteria...</td></tr>';
+        try {
+            const response = await fetch('/api/admin/ats_criteria');
+            if (!response.ok) throw new Error("Failed to load ATS criteria.");
+            const criteriaData = await response.json(); // Expected: { "Age": [{...}], "Skills": [{...}]}
+            atsCriteriaTableBody.innerHTML = '';
+            let hasCriteria = false;
+            for (const fieldLabel in criteriaData) {
+                criteriaData[fieldLabel].forEach(crit => {
+                    renderATSCriterionRow(crit);
+                    hasCriteria = true;
+                });
+            }
+            noAtsCriteriaRow.style.display = hasCriteria ? 'none' : 'table-row';
+            updateDashboardCounts();
+        } catch (error) {
+            atsCriteriaTableBody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">Error loading criteria.</td></tr>';
+            console.error("Load ATS criteria error:", error);
+        }
+    }
+
+    function renderATSCriterionRow(criterion) {
+        let valueDisplay = "";
+        if (criterion.condition_type === "range_numeric") {
+            valueDisplay = `Min: ${criterion.min_value ?? 'N/A'}, Max: ${criterion.max_value ?? 'N/A'}`;
+        } else if (criterion.condition_type === "contains_any") {
+            valueDisplay = (criterion.keywords || []).join(', ');
+        } // Add more for other types
+        const row = atsCriteriaTableBody.insertRow();
+        row.dataset.criterionId = criterion.id;
+        row.dataset.fieldLabel = criterion.field_label;
+        row.insertCell().textContent = criterion.field_label;
+        row.insertCell().textContent = criterion.condition_type.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+        row.insertCell().textContent = valueDisplay;
+        row.insertCell().innerHTML = `<span class="badge bg-${criterion.is_active ? 'success' : 'secondary'}">${criterion.is_active ? 'Active' : 'Inactive'}</span>`;
+        row.insertCell().innerHTML = `
+            <button class="btn btn-sm btn-outline-secondary btn-edit-ats-criterion me-1" title="Edit"><i class="bi bi-pencil"></i></button>
+            <button class="btn btn-sm btn-outline-danger btn-delete-ats-criterion" title="Delete"><i class="bi bi-trash"></i></button>`;
+    }
+
+    if (openAddAtsCriterionModalBtn) openAddAtsCriterionModalBtn.addEventListener('click', () => {
+        atsCriterionModalLabel.textContent = "Add ATS Criterion";
+        atsCriterionForm.reset();
+        atsCriterionIdInput.value = ''; // Clear ID for new criterion
+        atsCriterionIsActiveCheckbox.checked = true;
+        renderATSFieldsForCriteriaConfig(); // Ensure dropdown is populated
+        renderCriterionValueInputs(); // Render initial value inputs
+        hideAlert(atsCriterionFormAlert);
+        if(atsCriterionModalInstance) atsCriterionModalInstance.show();
+    });
+
+    if(atsCriterionConditionTypeSelect) atsCriterionConditionTypeSelect.addEventListener('change', renderCriterionValueInputs);
+
+    function renderCriterionValueInputs() {
+        if (!atsCriterionValuesContainer || !atsCriterionConditionTypeSelect) return;
+        const type = atsCriterionConditionTypeSelect.value;
+        atsCriterionValuesContainer.innerHTML = ''; // Clear previous
+        if (type === "range_numeric") {
+            atsCriterionValuesContainer.innerHTML = `
+                <div class="row g-2">
+                    <div class="col"><label for="atsCritMinValue" class="form-label">Min Value</label><input type="number" class="form-control form-control-sm" id="atsCritMinValue" required></div>
+                    <div class="col"><label for="atsCritMaxValue" class="form-label">Max Value</label><input type="number" class="form-control form-control-sm" id="atsCritMaxValue" required></div>
+                </div>`;
+        } else if (type === "contains_any") {
+            atsCriterionValuesContainer.innerHTML = `<label for="atsCritKeywords" class="form-label">Keywords (comma-separated)</label><input type="text" class="form-control form-control-sm" id="atsCritKeywords" placeholder="e.g., java, python" required>`;
+        }
+    }
+
+    if (atsCriterionForm) atsCriterionForm.addEventListener('submit', async function(event) {
+        event.preventDefault(); event.stopPropagation();
+        if (!this.checkValidity()) { this.classList.add('was-validated'); return; }
+        this.classList.remove('was-validated');
+        hideAlert(atsCriterionFormAlert);
+
+        const criterionId = atsCriterionIdInput.value;
+        const payload = {
+            field_label: atsCriterionFieldLabelSelect.value,
+            condition_type: atsCriterionConditionTypeSelect.value,
+            is_active: atsCriterionIsActiveCheckbox.checked,
+        };
+        if (payload.condition_type === "range_numeric") {
+            payload.min_value = parseFloat(document.getElementById('atsCritMinValue').value);
+            payload.max_value = parseFloat(document.getElementById('atsCritMaxValue').value);
+            if (isNaN(payload.min_value) || isNaN(payload.max_value) || payload.min_value > payload.max_value) {
+                showAlert(atsCriterionFormAlert, "Invalid min/max values for numeric range."); return;
+            }
+        } else if (payload.condition_type === "contains_any") {
+            const keywordsRaw = document.getElementById('atsCritKeywords').value;
+            payload.keywords = keywordsRaw ? keywordsRaw.split(',').map(kw => kw.trim().toLowerCase()).filter(Boolean) : [];
+            if (!payload.keywords.length) { showAlert(atsCriterionFormAlert, "Please enter at least one keyword."); return; }
+        }
+
+        const url = criterionId ? `/api/admin/ats_criteria/${payload.field_label}/${criterionId}` : '/api/admin/ats_criteria';
+        const method = criterionId ? 'PUT' : 'POST';
+        toggleButtonSpinner(saveAtsCriterionBtn, true);
+        try {
+            const response = await fetch(url, {method: method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)});
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.error || "Failed to save criterion.");
+            loadATSCriteria();
+            if(atsCriterionModalInstance) atsCriterionModalInstance.hide();
+            showFlashMessage(result.message, 'success');
+        } catch (error) { showAlert(atsCriterionFormAlert, error.message);
+        } finally { toggleButtonSpinner(saveAtsCriterionBtn, false); }
+    });
+
+    if (atsCriteriaTableBody) atsCriteriaTableBody.addEventListener('click', async (event) => {
+        const editBtn = event.target.closest('.btn-edit-ats-criterion');
+        const deleteBtn = event.target.closest('.btn-delete-ats-criterion');
+        if (editBtn) {
+            const row = editBtn.closest('tr');
+            const critId = row.dataset.criterionId;
+            const fieldLabel = row.dataset.fieldLabel;
+            // Fetch full criterion details if needed, or find from loaded data
+            let criterionToEdit = null;
+            if(ATS_VALIDATION_CRITERIA_DB && ATS_VALIDATION_CRITERIA_DB[fieldLabel]){
+                criterionToEdit = ATS_VALIDATION_CRITERIA_DB[fieldLabel].find(c => c.id === critId);
+            }
+            if (criterionToEdit) {
+                atsCriterionModalLabel.textContent = "Edit ATS Criterion";
+                atsCriterionIdInput.value = critId;
+                atsCriterionFieldLabelSelect.value = fieldLabel;
+                atsCriterionFieldLabelSelect.disabled = true; // Don't allow changing field for existing criterion
+                atsCriterionConditionTypeSelect.value = criterionToEdit.condition_type;
+                renderCriterionValueInputs(); // Render inputs based on type
+                // Populate values
+                if (criterionToEdit.condition_type === "range_numeric") {
+                    document.getElementById('atsCritMinValue').value = criterionToEdit.min_value ?? '';
+                    document.getElementById('atsCritMaxValue').value = criterionToEdit.max_value ?? '';
+                } else if (criterionToEdit.condition_type === "contains_any") {
+                    document.getElementById('atsCritKeywords').value = (criterionToEdit.keywords || []).join(', ');
+                }
+                atsCriterionIsActiveCheckbox.checked = criterionToEdit.is_active;
+                hideAlert(atsCriterionFormAlert);
+                if(atsCriterionModalInstance) atsCriterionModalInstance.show();
+            }
+        } else if (deleteBtn) {
+            const row = deleteBtn.closest('tr');
+            const critId = row.dataset.criterionId;
+            const fieldLabel = row.dataset.fieldLabel;
+            if (confirm(`Delete criterion for "${fieldLabel}"?`)) {
+                toggleButtonSpinner(deleteBtn, true);
+                try {
+                    const response = await fetch(`/api/admin/ats_criteria/${fieldLabel}/${critId}`, {method: 'DELETE'});
+                    const result = await response.json();
+                    if (!response.ok) throw new Error(result.error || "Delete failed.");
+                    loadATSCriteria(); showFlashMessage(result.message, 'success');
+                } catch (error) { showFlashMessage(`Error: ${error.message}`, 'danger');
+                } finally { toggleButtonSpinner(deleteBtn, false); }
+            }
+        }
+    });
+     if(atsCriterionModalEl) atsCriterionModalEl.addEventListener('hidden.bs.modal', () => {
+        atsCriterionFieldLabelSelect.disabled = false; // Re-enable field select on modal close
+    });
+
+
+    // Dashboard counts update
+    function updateDashboardCounts() {
+        const userCountDisplay = document.getElementById('user-count-display');
+        const poDbCountDisplay = document.getElementById('po-db-count-display');
+        const atsCriteriaCountDisplay = document.getElementById('ats-criteria-count-display');
+
+        if (userCountDisplay) { // Fetch from user table rows (excluding admin)
+             fetch('/api/admin/manage_users').then(r=>r.json()).then(users => userCountDisplay.textContent = users.length).catch(()=>userCountDisplay.textContent='Err');
+        }
+        if (poDbCountDisplay) { // Fetch from dummy_database in app.py (via an API if needed, or estimate)
+            // This is tricky without an API, let's just show number of keys in dummy_database.po
+            // This needs an API endpoint if you want live count from backend `dummy_database`
+            // For now, this will be an estimate based on local JS or a static number
+            poDbCountDisplay.textContent = Object.keys(ADMIN_CONFIGURABLE_FIELDS_PY.po || {}).length > 0 ? 'Some' : '0'; // Placeholder
+        }
+        if (atsCriteriaCountDisplay) { // Count active criteria
+            fetch('/api/admin/ats_criteria').then(r=>r.json()).then(criteria => {
+                let count = 0;
+                for(const field in criteria) { count += criteria[field].filter(c => c.is_active).length; }
+                atsCriteriaCountDisplay.textContent = count;
+            }).catch(()=>atsCriteriaCountDisplay.textContent='Err');
+        }
+    }
+
+
+    // --- Initial Load ---
+    showSection('dashboard-section'); // Default section
+    // Initial data loads are triggered by showSection if needed
+    // Or call them directly if always needed:
+    // loadAdminUsers();
+    // loadATSCriteria(); // Will also update its count
+    // renderPODataEntryFields(); // To show placeholder if nothing configured yet
+    // renderATSFieldsForCriteriaConfig();
+});
+</script>
+</body>
+</html>
+```
+
+---
+
+**3. `app_dashboard.html` (Updated for ATS Criteria Validation & PDF Download)**
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Dashboard | {{ current_tab_display_name }}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        body { padding-top: 65px; background-color: #f8f9fa; }
+        .navbar { background-color: #ffffff; border-bottom: 1px solid #dee2e6; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
+        .navbar-brand { color: #004671 !important; font-weight: 600; }
+        .container { max-width: 1200px; margin: auto; background-color: #ffffff; padding: 2rem; border-radius: 8px; margin-top: 2rem; border: 1px solid #dee2e6; }
+        .result-container { margin-top: 20px; border: 1px solid #e9ecef; border-radius: 0.25rem; padding: 15px; background-color: #f8f9fa; }
+        .result-title { font-weight: bold; color: #004671; margin-bottom: 10px; font-size: 1.2rem; display: flex; justify-content: space-between; align-items: center;}
+        pre { white-space: pre-wrap; background-color: #e9ecef; border: 1px solid #ced4da; border-radius: 0.25rem; padding: 10px; overflow-x: auto; font-size: 0.9rem; max-height: 300px; overflow-y: auto; }
+        .error-message { color: #dc3545; margin-top: 10px; font-weight: 500; }
+        .accuracy-good { color: #198754; font-weight: bold; }
+        .accuracy-moderate { color: #ffc107; font-weight: bold; }
+        .accuracy-bad { color: #dc3545; font-weight: bold; }
+        .mismatch-table { width: 100%; margin-top: 10px; border-collapse: collapse; font-size: 0.9rem; }
+        .mismatch-table th, .mismatch-table td { border: 1px solid #dee2e6; padding: 8px; text-align: left; }
+        .mismatch-table th { background-color: #e9ecef; font-weight: 500; }
+        .data-display-box { border: 1px solid #dee2e6; border-radius: 0.25rem; padding: 10px; background-color: #f8f9fa; margin-bottom: 10px; font-size: 0.9rem; }
+        .data-label { font-weight: bold; }
+        .nav-tabs .nav-link { color: #495057; }
+        .nav-tabs .nav-link.active { color: #004671; border-color: #dee2e6 #dee2e6 #ffffff; border-bottom-width: 3px; font-weight: 500; }
+        .tab-content { border: 1px solid #dee2e6; border-top: none; padding: 1.5rem; background-color: #ffffff; border-radius: 0 0 4px 4px; }
+        .alert { font-size: 0.9rem; }
+        .failed-criterion { color: #dc3545; }
+        .passed-criterion { color: #198754; }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-light fixed-top">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="{{ url_for('landing_page') }}">Verification App</a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav"><span class="navbar-toggler-icon"></span></button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav me-auto mb-2 mb-lg-0"></ul>
+                <div class="d-flex align-items-center">
+                     <span class="navbar-text me-3"><i class="fas fa-user"></i> {{ session.get('username', 'User') }} ({{ session.get('role', 'N/A').replace('_', ' ').title() }})</span>
+                     <a href="{{ url_for('logout') }}" class="btn btn-sm btn-outline-danger"><i class="fas fa-sign-out-alt"></i> Logout</a>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <h1 class="text-center mb-4">User Dashboard</h1>
+        {% include '_flash_messages.html' %}
+
+        {% if accessible_tabs_info and accessible_tabs_info|length > 0 %}
+            <ul class="nav nav-tabs mb-0" id="dashboardTabs" role="tablist">
+                {% for tab_id, tab_data in accessible_tabs_info.items() %}
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link {{ 'active' if active_tab_id == tab_id }}" id="{{ tab_id }}-tab" data-bs-toggle="tab" data-bs-target="#{{ tab_id }}-pane" type="button">
+                       <i class="{{ tab_data.icon }}"></i> {{ tab_data.name }}
+                    </button>
+                </li>
+                {% endfor %}
+            </ul>
+
+            <div class="tab-content" id="dashboardTabsContent">
+                {% for tab_id, tab_data in accessible_tabs_info.items() %}
+                <div class="tab-pane fade {{ 'show active' if active_tab_id == tab_id }}" id="{{ tab_id }}-pane" role="tabpanel">
+
+                    {# --- PO Verification Tab Content --- #}
+                    {% if tab_id == 'po' %}
+                    <h3 class="mb-3 mt-3">Upload Purchase Orders</h3>
+                    <form method="POST" enctype="multipart/form-data" action="{{ url_for('app_dashboard') }}" class="mb-4">
+                        <input type="hidden" name="upload_type" value="po"><input type="hidden" name="active_tab_id" value="po">
+                        <div class="mb-3"><label for="poFiles" class="form-label">Upload PO files:</label><input class="form-control" type="file" id="poFiles" name="document" accept="image/*,.pdf,.docx" multiple required></div>
+                        <button type="submit" class="btn btn-primary"><i class="fas fa-cogs"></i> Process PO Files</button>
+                    </form>
+                    {% if results and active_tab_id == 'po' %}{% for filename, res_data in results.items() %}<div class="result-container">
+                        <h4 class="result-title"><span>Results for: {{ filename }}</span>
+                            {% if not res_data.error %}
+                            <a href="{{ url_for('download_report', doc_type='po', filename_key=filename) }}" class="btn btn-sm btn-outline-secondary" target="_blank"><i class="bi bi-download me-1"></i>Download Report</a>
+                            {% endif %}
+                        </h4>
+                        {% if res_data.error %}<p class="error-message"><i class="fas fa-exclamation-triangle"></i> {{ res_data.error }}</p>
+                        {% else %}
+                            <div class="mb-3"><h5><i class="fas fa-highlighter"></i> Extracted Text:</h5><pre>{{ res_data.extracted_text | default('N/A') }}</pre></div>
+                            <div class="row">
+                                <div class="col-md-6 mb-3"><h5><i class="fas fa-project-diagram"></i> Extracted Data:</h5><div class="data-display-box">
+                                    {% if res_data.structured_data %}<dl>{% for field, value in res_data.structured_data.items() %}{% if field in PO_FIELDS_FOR_USER_EXTRACTION %}<dt class="data-label">{{ field }}:</dt><dd>{{ value | default('N/A', true) }}</dd>{% endif %}{% endfor %}</dl>{% else %}<p>No data.</p>{% endif %}</div></div>
+                                 <div class="col-md-6 mb-3"><h5><i class="fas fa-database"></i> Database Data (Comparison):</h5><div class="data-display-box">
+                                    {% if res_data.db_record_for_display %}<dl>{% for field, value in res_data.db_record_for_display.items() %}<dt class="data-label">{{ field }}:</dt><dd>{{ value | default('N/A', true) }}</dd>{% endfor %}</dl>
+                                    {% elif res_data.comparison_error and "not found" in res_data.comparison_error|string %}<p class="text-muted">{{ res_data.comparison_error }}</p>{% else %}<p>No DB record.</p>{% endif %}</div></div>
+                            </div>
+                            {% if 'accuracy' in res_data %}<h5 class="mt-3"><i class="fas fa-check-double"></i> PO Comparison & Accuracy:</h5><div class="data-display-box">
+                                {% if res_data.comparison_error and not res_data.db_record_for_display %}<p class="error-message">{{ res_data.comparison_error }}</p>
+                                {% else %}<p>Accuracy {% if res_data.compared_fields_list %}(based on: {{ res_data.compared_fields_list|join(', ') }}){% endif %}: {% set acc = res_data.accuracy %}{% if acc >= 99.9 %}<span class="accuracy-good">Excellent ({{ "%.1f"|format(acc) }}%)</span>{% elif acc >= 80 %}<span class="accuracy-good">Good ({{ "%.1f"|format(acc) }}%)</span>{% elif acc >= 60 %}<span class="accuracy-moderate">Moderate ({{ "%.1f"|format(acc) }}%)</span>{% else %}<span class="accuracy-bad">Low ({{ "%.1f"|format(acc) }}%)</span>{% endif %}</p>
+                                    {% if res_data.mismatched_fields %}<h6 class="mt-2">Mismatched Fields:</h6><table class="mismatch-table"><thead><tr><th>Field</th><th>Extracted</th><th>Database</th></tr></thead><tbody>{% for field, mismatch in res_data.mismatched_fields.items() %}<tr><td>{{ field }}</td><td>{{ mismatch.extracted_value | default('(empty)', true) }}</td><td>{{ mismatch.db_value | default('(empty)', true) }}</td></tr>{% endfor %}</tbody></table>
+                                    {% elif res_data.accuracy >= 99.9 %}<p class="text-success"><i class="fas fa-thumbs-up"></i> All compared fields matched!</p>{% else %}<p>No mismatches.</p>{% endif %}{% endif %}</div>
+                            {% endif %}
+                        {% endif %}</div>{% endfor %}{% elif request.method == 'POST' and active_tab_id == 'po' %}<div class="alert alert-info mt-3">Processing done.</div>{% endif %}
+                    {% endif %}
+
+                    {# --- ATS Verification Tab Content --- #}
+                    {% if tab_id == 'ats' %}
+                    <h3 class="mb-3 mt-3">Upload Resumes (ATS)</h3>
+                    <form method="POST" enctype="multipart/form-data" action="{{ url_for('app_dashboard') }}" class="mb-4">
+                        <input type="hidden" name="upload_type" value="ats"><input type="hidden" name="active_tab_id" value="ats">
+                        <div class="mb-3"><label for="atsFiles" class="form-label">Upload Resumes:</label><input class="form-control" type="file" id="atsFiles" name="document" accept=".pdf,.docx,image/*" multiple required></div>
+                        <button type="submit" class="btn btn-primary"><i class="fas fa-user-tie"></i> Process Resumes</button>
+                    </form>
+                     {% if results and active_tab_id == 'ats' %}{% for filename, res_data in results.items() %}<div class="result-container">
+                        <h4 class="result-title"><span>Results for: {{ filename }}</span>
+                            {% if not res_data.error %}
+                            <a href="{{ url_for('download_report', doc_type='ats', filename_key=filename) }}" class="btn btn-sm btn-outline-secondary" target="_blank"><i class="bi bi-download me-1"></i>Download Report</a>
+                            {% endif %}
+                        </h4>
+                        {% if res_data.error %}<p class="error-message"><i class="fas fa-exclamation-triangle"></i> {{ res_data.error }}</p>
+                        {% else %}
+                            <div class="mb-3"><h5><i class="fas fa-highlighter"></i> Extracted Text:</h5><pre>{{ res_data.extracted_text | default('N/A') }}</pre></div>
+                            <div class="mb-3"><h5><i class="fas fa-project-diagram"></i> Extracted Data:</h5><div class="data-display-box">
+                                {% if res_data.structured_data %}<dl>{% for field, value in res_data.structured_data.items() %}{% if field in ATS_FIELDS_FOR_USER_EXTRACTION %}<dt class="data-label">{{ field }}:</dt><dd>{{ value | default('N/A', true) }}</dd>{% endif %}{% endfor %}</dl>{% else %}<p>No data.</p>{% endif %}</div></div>
+                            {% if 'accuracy' in res_data %}<h5 class="mt-3"><i class="fas fa-tasks"></i> ATS Criteria Validation & Accuracy:</h5><div class="data-display-box">
+                                {% if res_data.comparison_error %}<p class="text-muted">{{ res_data.comparison_error }}</p>{% endif %}
+                                <p>Accuracy (Criteria Met): {% set acc = res_data.accuracy %}{% if acc >= 99.9 %}<span class="accuracy-good">Excellent ({{ "%.1f"|format(acc) }}%)</span>{% elif acc >= 80 %}<span class="accuracy-good">Good ({{ "%.1f"|format(acc) }}%)</span>{% elif acc >= 60 %}<span class="accuracy-moderate">Moderate ({{ "%.1f"|format(acc) }}%)</span>{% else %}<span class="accuracy-bad">Low ({{ "%.1f"|format(acc) }}%)</span>{% endif %}</p>
+                                {% if res_data.mismatched_fields %}<h6 class="mt-2">Failed Criteria:</h6><ul class="list-unstyled">{% for field, reason in res_data.mismatched_fields.items() %}<li class="failed-criterion"><i class="bi bi-x-circle-fill me-1"></i><strong>{{ field }}:</strong> {{ reason }}</li>{% endfor %}</ul>
+                                {% elif res_data.accuracy >= 99.9 and res_data.compared_fields_list %}<p class="text-success"><i class="fas fa-thumbs-up"></i> All active criteria passed!</p>
+                                {% elif not res_data.compared_fields_list %}<p class="text-muted">No active criteria to validate against.</p>
+                                {% else %}<p>No criteria failed.</p>{% endif %}</div>
+                            {% endif %}
+                        {% endif %}</div>{% endfor %}{% elif request.method == 'POST' and active_tab_id == 'ats' %}<div class="alert alert-info mt-3">Processing done.</div>{% endif %}
+                    {% endif %}
+
+                    {# Part Drawing tab removed #}
+                </div>
+                {% endfor %}
+            </div>
+        {% else %}
+            <div class="alert alert-warning mt-4">No modules assigned. Contact admin.</div>
+        {% endif %}
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+```
+
+This is a very large set of changes. After updating these files, restart your Flask application and test each piece of functionality thoroughly:
+
+1.  **Admin:**
+    *   Login.
+    *   Manage Users: Create users with different roles (Sub-Admin, PO Verifier, ATS Verifier).
+    *   Add PO Data: Configure PO fields for entry, then add a few PO records to the `dummy_database`.
+    *   Manage ATS Criteria: Configure ATS fields for criteria, then add criteria for Age, Salary, Percentage, and Skills.
+2.  **User (PO Verifier Role):**
+    *   Login. Should only see PO tab.
+    *   Upload a PO PDF.
+    *   Check extracted data, DB comparison, accuracy.
+    *   Test PDF report download for PO.
+3.  **User (ATS Verifier Role):**
+    *   Login. Should only see ATS tab.
+    *   Upload a Resume PDF (like your Olivia Miller sample).
+    *   Check extracted data.
+    *   Check validation results against criteria, accuracy.
+    *   Test PDF report download for ATS.
+4.  **User (Sub-Admin Role):**
+    *   Login. Should see both PO and ATS tabs. Test both.
+
+This iterative process of coding and testing is normal for a project of this complexity. Let me know what you find or if specific parts give errors!

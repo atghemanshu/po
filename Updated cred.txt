@@ -1,0 +1,21 @@
+
+Admin:
+Login Page: /admin
+User ID (Email): admin@example.com
+Password: admin@a123
+Sub-Admin:
+Login Page: /login
+User ID (Email): subadmin@example.com
+Password: sub@123
+PO Verifier:
+Login Page: /login
+User ID (Email): po@example.com
+Password:  wmQVsB}=8L
+ATS Verifier:
+Login Page: /login
+User ID (Email): ats@example.com
+Password: ats@123
+
+Sr
+s@gmail.com
+Sa23#qwe

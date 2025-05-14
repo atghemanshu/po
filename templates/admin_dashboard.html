@@ -1,0 +1,952 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin Console - Verification App</title>
+<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+    body { background-color: #f8f9fa; font-family: 'Roboto', sans-serif; color: #343a40; }
+    .sidebar { background-color: #ffffff; height: 100vh; padding: 1.5rem 1rem; border-right: 1px solid #dee2e6; position: fixed; width: 250px; overflow-y: auto; box-shadow: 2px 0 5px rgba(0,0,0,0.05); z-index: 1000; }
+    .sidebar .logo { display: block; margin: 0 auto 1.5rem auto; text-align: center; }
+    .sidebar a { display: flex; align-items: center; padding: 0.8rem 1rem; margin-bottom: 0.5rem; color: #495057; text-decoration: none; border-radius: 8px; font-weight: 500; transition: background-color 0.2s ease-in-out, color 0.2s ease-in-out; }
+    .sidebar a:hover { background-color: #e9ecef; color: #007bff; }
+    .sidebar a.active { background-color: #007BFF; color: white; font-weight: bold; }
+    .sidebar a i { margin-right: 0.8rem; font-size: 1.1rem; width: 20px; text-align: center; }
+    .dashboard-content { margin-left: 260px; padding: 2rem; }
+    .content-section { padding: 25px; background-color: #ffffff; margin-bottom: 25px; border-radius: 8px; box-shadow: 0 0.2rem 0.5rem rgba(0,0,0,0.075); border: 1px solid #dee2e6; }
+    .content-section h2 { color: #0056b3; margin-bottom: 0.5rem; display: flex; align-items: center; }
+    .content-section h2 i { margin-right: 0.6rem; }
+    .content-section hr { margin-top: 0.5rem; margin-bottom: 1.5rem; border-top: 1px solid #dee2e6; }
+    .card { border: 1px solid #e0e0e0; border-radius: 8px; box-shadow: none; }
+    .card h5 { color: #0056b3; }
+    .navbar { background-color: #ffffff !important; border-bottom: 1px solid #dee2e6; box-shadow: 0 2px 4px rgba(0,0,0,0.04); }
+    .dashboard-content .navbar { margin-bottom: 2rem; border-radius: 8px; }
+    .modal-header { background-color: #f8f9fa; border-bottom: 1px solid #dee2e6; }
+    .modal-title { color: #0056b3; }
+    .table thead th { background-color: #e9ecef; color: #495057; font-weight: 600; border-bottom: 2px solid #dee2e6; white-space: nowrap;}
+    .table-hover > tbody > tr:hover { background-color: #f1f3f5; }
+    .content-section:not(#dashboard-section) { display: none; }
+
+    /* === CSS FIX FOR CHECKBOX VISIBILITY === */
+    #master-fields-checkbox-list .form-check {
+        padding: 0.5rem 0.8rem; /* Standard padding */
+        border-bottom: 1px solid #eee;
+        position: relative; /* For potential pseudo-elements if needed later */
+        display: block; /* Make each .form-check a block, items inside will flow naturally */
+        min-height: 50px; /* Increased min-height for the row */
+    }
+    #master-fields-checkbox-list .form-check:last-child {
+        border-bottom: none;
+    }
+
+    #master-fields-checkbox-list .form-check-input {
+        width: 1.2em;  /* Slightly larger */
+        height: 1.2em; /* Slightly larger */
+        margin-right: 0.75rem; /* Space between checkbox and label */
+        vertical-align: top; /* Align checkbox to the top of its line */
+        margin-top: 0.25em;   /* Nudge down to align with first line of label text */
+                              /* THIS IS A KEY VALUE TO TWEAK: 0.1em, 0.2em, 0.3em */
+        float: left; /* Float the checkbox to the left */
+    }
+
+   #master-fields-checkbox-list .form-check-label {
+        font-weight: 500;
+        line-height: 1.4; 
+        display: block; /* Make label a block */
+        margin-left: 2.2em; /* Create space for the floated checkbox (1.2em width + 0.75rem margin-right + some buffer) */
+                            /* Adjust this if checkbox size/margin changes */
+        padding-top: 0.15em; /* Align top of label text with checkbox */
+    }
+
+    .field-description-modal {
+        font-size: 0.8rem;
+        color: #6c757d;
+        font-weight: normal;
+        display: block; 
+        margin-top: 0.15rem; 
+        line-height: 1.3;
+        clear: left; /* Ensure description is below the floated checkbox if label is short */
+        padding-left: 0; /* If label had margin-left, description might not need it */
+    }
+    /* === END CSS FIX === */
+
+
+    .extraction-input-group { margin-bottom: 1rem; }
+    .extraction-input-group label { font-weight: 500; color: #495057; }
+    .extraction-input-group .form-text { font-size: 0.8rem; }
+    .column-title-main { font-size: 1.3rem; color: #495057; margin-bottom: 0.5rem; padding-bottom: 0.5rem; border-bottom: 2px solid #007bff; display: inline-block;}
+    .column-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; flex-wrap: wrap;}
+    .btn-configure-extraction { font-size: 0.85rem; }
+    #atsCriteriaTable th, #atsCriteriaTable td { vertical-align: middle; font-size:0.9rem; }
+    .value-display-ats { max-width: 250px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: middle; }
+</style>
+</head>
+<body>
+<div class="sidebar">
+    <div class="logo">
+         <img src="{{ url_for('static', filename='Group 1000008859.png') }}" alt="Logo" height="45" class="mb-3">
+    </div>
+    <a href="#dashboard" class="nav-link active" data-target="dashboard-section" id="nav-dashboard"><i class="bi bi-speedometer2"></i> Dashboard</a>
+    <a href="#users" class="nav-link" data-target="users-section" id="nav-users"><i class="bi bi-people-fill"></i>Manage Users</a>
+    <a href="#add_po_data" class="nav-link" data-target="add_po_data-section" id="nav-add_po_data"><i class="bi bi-database-add"></i>Add PO Data</a>
+    <a href="#manage_ats_criteria" class="nav-link" data-target="manage_ats_criteria-section" id="nav-manage_ats_criteria"><i class="bi bi-ui-checks-grid"></i>Manage ATS Criteria</a>
+    <a href="{{ url_for('logout') }}"><i class="bi bi-box-arrow-right"></i> Logout</a>
+</div>
+
+<div class="dashboard-content">
+    <nav class="navbar navbar-expand-lg navbar-light bg-light">
+        <div class="container-fluid">
+            <a class="navbar-brand ms-2" href="#">Admin Console</a>
+            <span class="navbar-text ms-auto me-2">Welcome, {{ session.get('username', 'Admin') }}!</span>
+        </div>
+    </nav>
+    <div id="flash-message-container" class="mb-3"> {% include '_flash_messages.html' %} </div>
+
+    <section id="dashboard-section" class="content-section active">
+        <h2><i class="bi bi-speedometer2"></i> Dashboard</h2><hr>
+        <div class="row">
+            <div class="col-md-4 mb-3"><div class="card text-center h-100"><div class="card-body d-flex flex-column justify-content-between"><div><h5 class="card-title"><i class="bi bi-people-fill me-2"></i> Managed Users</h5><p class="card-text display-4 fw-bold text-primary" id="user-count-display">0</p></div><button class="btn btn-outline-primary mt-3 nav-button-card" data-target="users-section">Manage Users</button></div></div></div>
+            <div class="col-md-4 mb-3"><div class="card text-center h-100"><div class="card-body d-flex flex-column justify-content-between"><div><h5 class="card-title"><i class="bi bi-database-check me-2"></i> PO DB Entries</h5><p class="card-text display-4 fw-bold text-primary" id="po-db-count-display">0</p></div><button class="btn btn-outline-primary mt-3 nav-button-card" data-target="add_po_data-section">Add PO Data</button></div></div></div>
+            <div class="col-md-4 mb-3"><div class="card text-center h-100"><div class="card-body d-flex flex-column justify-content-between"><div><h5 class="card-title"><i class="bi bi-card-checklist me-2"></i> Active ATS Criteria</h5><p class="card-text display-4 fw-bold text-primary" id="ats-criteria-count-display">0</p></div><button class="btn btn-outline-primary mt-3 nav-button-card" data-target="manage_ats_criteria-section">Manage ATS Criteria</button></div></div></div>
+        </div>
+    </section>
+
+    <section id="users-section" class="content-section">
+        <div class="d-flex justify-content-between align-items-center"><h2><i class="bi bi-people-fill"></i> Manage Users</h2><button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#createUserModal"><i class="bi bi-plus-circle me-1"></i> Create User</button></div><hr>
+        <div class="table-responsive"><table class="table table-striped table-hover align-middle"><thead><tr><th>Username</th><th>Email</th><th>Role</th><th class="text-center">Actions</th></tr></thead><tbody id="user-table-body"></tbody></table></div>
+        <p id="no-users-message" class="text-muted mt-3" style="display: none;">No users found.</p>
+    </section>
+
+    <section id="add_po_data-section" class="content-section">
+        <div class="column-header">
+            <h2 class="column-title-main"><i class="bi bi-file-earmark-text text-info"></i> Add/Update PO Data in Database</h2>
+            <button type="button" class="btn btn-outline-primary btn-configure-extraction" data-bs-toggle="modal" data-bs-target="#configureFieldsModal" data-config-type="po"><i class="bi bi-gear"></i> Configure PO Fields for Entry</button>
+        </div>
+         <div class="alert alert-info d-none mt-2" id="poDataFormAlert"></div>
+        <form id="poDataEntryForm">
+            <div id="po-data-entry-fields-list" class="mt-3 row">
+                <p class="text-muted col-12" id="po-data-entry-placeholder">Configure PO fields or select default to start entering data.</p>
+            </div>
+            <div class="mt-3 d-flex justify-content-end" id="savePODataContainer" style="display:none;">
+                <button type="submit" class="btn btn-success" id="submitPODataBtn"><i class="bi bi-save"></i> Save PO Data</button>
+            </div>
+        </form>
+
+        <!-- MOVED Existing PO Database Entries block INSIDE the section -->
+        <hr class="mt-5">
+        <h3 class="mt-3 mb-3"><i class="bi bi-list-ul text-secondary"></i> Existing PO Database Entries</h3>
+        <div id="existing-po-data-alert" class="alert alert-info d-none"></div> <!-- Ensure this alert is also inside -->
+        <div class="table-responsive">
+            <table class="table table-sm table-hover" id="existingPoDataTable">
+                <thead>
+                    <tr>
+                        <!-- Headers will be dynamically generated -->
+                    </tr>
+                </thead>
+                <tbody id="existingPoDataTableBody">
+                    <tr id="no-existing-po-data-row">
+                        <td colspan="5" class="text-center text-muted py-3">No PO data found in the database.</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <!-- End of MOVED block -->
+
+    </section>
+
+
+    <section id="manage_ats_criteria-section" class="content-section">
+        <div class="d-flex justify-content-between align-items-center"><h2><i class="bi bi-ui-checks-grid"></i> Manage ATS Validation Criteria</h2><button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#addEditAtsCriterionModal" id="openAddAtsCriterionModal"><i class="bi bi-plus-circle"></i> Add New Criterion</button></div><hr>
+        <div id="ats-criteria-config-header" class="column-header mb-3">
+             <h3 class="column-title-main" style="border:none; margin-bottom:0;"><i class="bi bi-person-lines-fill text-success"></i> Configurable ATS Fields</h3>
+            <button type="button" class="btn btn-outline-success btn-configure-extraction" data-bs-toggle="modal" data-bs-target="#configureFieldsModal" data-config-type="ats"><i class="bi bi-gear"></i> Configure ATS Fields for Criteria</button>
+        </div>
+        <p id="no-ats-fields-for-criteria-msg" class="text-muted" style="display:none;">Please configure ATS fields to be able to set criteria for them.</p>
+        <div class="table-responsive mt-3">
+            <table class="table table-hover" id="atsCriteriaTable">
+                <thead><tr><th>Field Label</th><th>Condition</th><th>Value(s)</th><th>Active</th><th class="text-center">Actions</th></tr></thead>
+                <tbody id="atsCriteriaTableBody"><tr id="no-ats-criteria-row"><td colspan="5" class="text-center text-muted py-3">No ATS criteria defined.</td></tr></tbody>
+            </table>
+        </div>
+    </section>
+
+    <!-- MODALS -->
+    <div class="modal fade" id="createUserModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered"><div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title"><i class="bi bi-person-plus-fill me-2"></i>Create User</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body"><div class="alert alert-danger d-none" id="createUserFormAlert"></div><form id="createUserForm_inner" novalidate>
+            <div class="mb-3"><label for="newUsername" class="form-label">Username*</label><input type="text" class="form-control" id="newUsername" required></div>
+            <div class="mb-3"><label for="newUserEmail" class="form-label">Email*</label><input type="email" class="form-control" id="newUserEmail" required></div>
+            <div class="mb-3"><label for="newUserPassword" class="form-label">Password*</label><input type="password" class="form-control" id="newUserPassword" required></div>
+            <div class="mb-3"><label class="form-label">Role*</label><div id="roleSelectFeedback" class="text-danger small d-none">Select a role.</div>
+                <div class="form-check"><input class="form-check-input" type="radio" name="userRole" id="roleSubAdmin" value="sub_admin" required><label class="form-check-label" for="roleSubAdmin">Sub-Admin (PO & ATS)</label></div>
+                <div class="form-check"><input class="form-check-input" type="radio" name="userRole" id="rolePO" value="po_verifier"><label class="form-check-label" for="rolePO">PO Verifier</label></div>
+                <div class="form-check"><input class="form-check-input" type="radio" name="userRole" id="roleATS" value="ats_verifier"><label class="form-check-label" for="roleATS">ATS Verifier</label></div>
+            </div></form></div>
+        <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button type="submit" class="btn btn-primary" form="createUserForm_inner" id="submitCreateUserBtn"><span class="spinner-border spinner-border-sm d-none me-1"></span>Create</button></div>
+    </div></div></div>
+
+    <div class="modal fade" id="configureFieldsModal" tabindex="-1"><div class="modal-dialog modal-dialog-scrollable modal-lg"><div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title" id="configureFieldsModalLabel"><i class="bi bi-gear-fill me-2"></i>Configure Fields</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body" style="max-height: 70vh; overflow-y: auto;">
+            <input type="hidden" id="currentConfigType">
+            <div id="master-fields-checkbox-list" style="max-height: 400px; overflow: auto; padding-left: 2vmin;"><p class="text-center text-muted">Loading fields...</p></div>
+        </div>
+        <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button><button type="button" class="btn btn-primary" id="saveFieldConfigurationBtn">Save Configuration</button></div>
+    </div></div></div>
+
+    <div class="modal fade" id="addEditAtsCriterionModal" tabindex="-1"><div class="modal-dialog modal-dialog-centered modal-lg"><div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title" id="atsCriterionModalLabel">Add ATS Criterion</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body">
+            <div class="alert alert-danger d-none" id="atsCriterionFormAlert"></div>
+            <form id="atsCriterionForm" novalidate>
+                <input type="hidden" id="atsCriterionId">
+                <div class="mb-3"><label for="atsCriterionFieldLabel" class="form-label">Field Name*</label><select class="form-select" id="atsCriterionFieldLabel" required><option value="" selected disabled>-- Select --</option></select></div>
+                <div class="mb-3"><label for="atsCriterionConditionType" class="form-label">Condition*</label><select class="form-select" id="atsCriterionConditionType" required>
+                    <option value="" selected disabled>-- Select Condition --</option>
+                    <option value="range_numeric">Numeric Range (e.g., Age between 25-30)</option>
+                    <option value="contains_any">Contains Any Keyword(s) (e.g., Skills: Java, Python)</option>
+                    <option value="equals_string">Equals String (e.g., Gender: Male)</option>
+                    <option value="min_numeric">Min Numeric Value (e.g., Experience >= 2 years)</option>
+                    <option value="max_numeric">Max Numeric Value (e.g., Salary <= 50000)</option>
+                    <option value="is_one_of">Is One Of (Strings) (e.g., City: London, Paris)</option>
+                </select></div>
+                <div id="atsCriterionValuesContainer" class="mb-3"></div>
+                <div class="form-check mb-3"><input class="form-check-input" type="checkbox" id="atsCriterionIsActive" checked><label class="form-check-label" for="atsCriterionIsActive">Is Active (criterion will be used for validation)</label></div>
+            </form>
+        </div>
+        <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button type="submit" class="btn btn-primary" form="atsCriterionForm" id="saveAtsCriterionBtn"><span class="spinner-border spinner-border-sm d-none me-1"></span>Save Criterion</button></div>
+    </div></div></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    
+    <script>
+        // Correctly inject Python data into JavaScript
+        const ADMIN_CONFIGURABLE_FIELDS_PY = {{ admin_configurable_fields_data | tojson | safe }};
+    </script>
+
+     <script>
+document.addEventListener('DOMContentLoaded', () => {
+    // --- Get ALL Necessary Elements ---
+    const navLinks = document.querySelectorAll('.sidebar .nav-link');
+    const contentSections = document.querySelectorAll('.dashboard-content > .content-section');
+    const flashContainer = document.getElementById('flash-message-container');
+
+    // User Management
+    const userTableBody = document.getElementById('user-table-body');
+    const noUsersMessage = document.getElementById('no-users-message');
+    const createUserModalEl = document.getElementById('createUserModal');
+    const createUserModalInstance = createUserModalEl ? bootstrap.Modal.getOrCreateInstance(createUserModalEl) : null;
+    const createUserFormInner = document.getElementById('createUserForm_inner');
+    const createUserFormAlert = document.getElementById('createUserFormAlert');
+    const roleSelectFeedback = document.getElementById('roleSelectFeedback');
+    const submitCreateUserBtn = document.getElementById('submitCreateUserBtn');
+    const userCountDisplay = document.getElementById('user-count-display');
+
+    // PO Data Entry
+    const poDataEntryFieldsList = document.getElementById('po-data-entry-fields-list');
+    const poDataEntryPlaceholder = document.getElementById('po-data-entry-placeholder');
+    const poDataEntryForm = document.getElementById('poDataEntryForm');
+    const poDataFormAlert = document.getElementById('poDataFormAlert'); // Alert for PO form
+    const savePODataContainer = document.getElementById('savePODataContainer');
+    const submitPODataBtn = document.getElementById('submitPODataBtn');
+    const poDbCountDisplay = document.getElementById('po-db-count-display');
+
+    // ATS Criteria Management
+    const atsCriteriaTableBody = document.getElementById('atsCriteriaTableBody');
+    const noAtsCriteriaRow = document.getElementById('no-ats-criteria-row');
+    const openAddAtsCriterionModalBtn = document.getElementById('openAddAtsCriterionModal');
+    const atsCriterionModalEl = document.getElementById('addEditAtsCriterionModal');
+    const atsCriterionModalInstance = atsCriterionModalEl ? bootstrap.Modal.getOrCreateInstance(atsCriterionModalEl) : null;
+    const atsCriterionModalLabel = document.getElementById('atsCriterionModalLabel');
+    const atsCriterionForm = document.getElementById('atsCriterionForm');
+    const atsCriterionIdInput = document.getElementById('atsCriterionId');
+    const atsCriterionFieldLabelSelect = document.getElementById('atsCriterionFieldLabel');
+    const atsCriterionConditionTypeSelect = document.getElementById('atsCriterionConditionType');
+    const atsCriterionValuesContainer = document.getElementById('atsCriterionValuesContainer');
+    const atsCriterionIsActiveCheckbox = document.getElementById('atsCriterionIsActive');
+    const atsCriterionFormAlert = document.getElementById('atsCriterionFormAlert');
+    const saveAtsCriterionBtn = document.getElementById('saveAtsCriterionBtn');
+    const noAtsFieldsForCriteriaMsg = document.getElementById('no-ats-fields-for-criteria-msg');
+    const atsCriteriaCountDisplay = document.getElementById('ats-criteria-count-display');
+
+    // Configure Fields Modal
+    const configureFieldsModalEl = document.getElementById('configureFieldsModal');
+    const configureFieldsModalInstance = configureFieldsModalEl ? bootstrap.Modal.getOrCreateInstance(configureFieldsModalEl) : null;
+    const configureFieldsModalLabel = document.getElementById('configureFieldsModalLabel');
+    const currentConfigTypeInput = document.getElementById('currentConfigType');
+    const masterFieldsCheckboxList = document.getElementById('master-fields-checkbox-list');
+    const saveFieldConfigurationBtn = document.getElementById('saveFieldConfigurationBtn');
+
+    // State
+    let adminConfiguredFields = { 
+        po: (ADMIN_CONFIGURABLE_FIELDS_PY.po || []).map(f => f.label), // Default to all PO fields initially configured for entry
+        ats: (ADMIN_CONFIGURABLE_FIELDS_PY.ats || []).map(f => f.label) // Default to all ATS fields initially configured for criteria
+    };
+    let loadedAtsCriteria = {}; 
+    let editingCriterionId = null; // For ATS criteria edit
+
+    // --- START: HELPER FUNCTIONS ---
+    function escapeHTML(str) { /* ... (keep implementation) ... */ 
+        if (str === null || typeof str === 'undefined') return '';
+        const div = document.createElement('div'); div.textContent = str; return div.innerHTML;
+    }
+    function showFlashMessage(message, category = 'info', duration = 7000) { /* ... (keep implementation) ... */ 
+        if (!flashContainer) { console.warn("Flash container not found"); alert(`Flash (${category}): ${message}`); return; }
+        const alertId = `flash-${Date.now()}-${Math.random().toString(36).substring(2,7)}`;
+        flashContainer.insertAdjacentHTML('beforeend', `<div class="alert alert-${category} alert-dismissible fade show" role="alert" id="${alertId}">${escapeHTML(message)}<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>`);
+        if (duration > 0) {
+            setTimeout(() => {
+                const el = document.getElementById(alertId);
+                if (el) { const bsAlert = bootstrap.Alert.getOrCreateInstance(el); if (bsAlert) bsAlert.close(); else el.remove(); }
+            }, duration);
+        }
+    }
+    function showAlert(alertElement, message, type = 'danger') { /* ... (keep implementation) ... */ 
+        if (!alertElement) { console.warn("Alert element not found for:", message); return; }
+        alertElement.className = `alert alert-${type} mb-3`;
+        alertElement.innerHTML = escapeHTML(message);
+        alertElement.classList.remove('d-none');
+    }
+    function hideAlert(alertElement) { /* ... (keep implementation) ... */ 
+        if (!alertElement) return;
+        alertElement.classList.add('d-none'); alertElement.innerHTML = '';
+    }
+    function toggleButtonSpinner(button, showSpinner) { /* ... (keep implementation) ... */ 
+        if (!button) return;
+        const spinner = button.querySelector('.spinner-border');
+        const icon = button.querySelector('i:not(.spinner-border)'); // Ensure 'i' is not the spinner itself
+        if (showSpinner) {
+            if (spinner) spinner.classList.remove('d-none'); else button.insertAdjacentHTML('afterbegin', '<span class="spinner-border spinner-border-sm me-1"></span>');
+            if (icon) icon.style.display = 'none';
+            button.disabled = true;
+        } else {
+            if (spinner) spinner.classList.add('d-none');
+            if (icon) icon.style.display = ''; // Reset display for icon
+            button.disabled = false;
+        }
+    }
+    // --- END: HELPER FUNCTIONS ---
+
+    // --- Navigation ---
+    function showSection(targetId) { /* ... (keep implementation from previous, ensuring card buttons also work) ... */
+        console.log("showSection called with targetId:", targetId);
+        if (!targetId) { targetId = 'dashboard-section'; }
+        navLinks.forEach(l => l.classList.remove('active'));
+        contentSections.forEach(s => { if(s) s.style.display = 'none';});
+        const targetSection = document.getElementById(targetId);
+        const targetNavLink = document.querySelector(`.sidebar a[data-target="${targetId}"]`);
+        if (targetSection) targetSection.style.display = 'block';
+        else { document.getElementById('dashboard-section')?.classList.add('active'); } // Fallback
+        if (targetNavLink) targetNavLink.classList.add('active');
+        else { document.getElementById('nav-dashboard')?.classList.add('active'); } // Fallback
+        // Load data for sections
+        if (targetId === 'users-section') loadAdminUsers();
+        if (targetId === 'add_po_data-section') 
+           console.log("Inside showSection: 'add_po_data-section' detected. Calling renderPODataEntryFields and loadAndDisplayExistingPOData."); // Specific debug
+        renderPODataEntryFields(); 
+        loadAndDisplayExistingPOData(); 
+        {
+             console.log("SHOWING ADD PO DATA SECTION - Attempting to load PO form and existing entries..."); // DEBUG
+        renderPODataEntryFields(); 
+        loadAndDisplayExistingPOData(); 
+        }
+        renderPODataEntryFields(); // Ensures fields are up-to-date
+        if (targetId === 'manage_ats_criteria-section') setupManageAtsCriteriaSection();
+         setupManageAtsCriteriaSection();
+        updateDashboardCounts();
+    }
+    navLinks.forEach(link => {
+        const target = link.dataset.target;
+        if (target) { link.addEventListener('click', (e) => { e.preventDefault(); showSection(target); }); }
+    });
+    document.querySelectorAll('.nav-button-card[data-target]').forEach(button => { // Card buttons
+        const target = button.dataset.target;
+        if (target) { button.addEventListener('click', () => showSection(target)); }
+    });
+    
+    // --- User Management (Create, List, Delete - Edit is disabled) ---
+    async function loadAdminUsers() { /* ... (keep implementation, ensure Edit button is disabled) ... */
+      credentials: 'same-origin'
+        if (!userTableBody) return;
+        userTableBody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3"><div class="spinner-border spinner-border-sm me-1"></div>Loading users...</td></tr>';
+        if(noUsersMessage) noUsersMessage.style.display = 'none';
+        try {
+            const response = await fetch('/api/admin/manage_users');
+            if (!response.ok) throw new Error(`HTTP error ${response.status}`);
+            const users = await response.json();
+            userTableBody.innerHTML = '';
+            if (users.length > 0) {
+                users.forEach(user => {
+                    const row = userTableBody.insertRow();
+                    row.insertCell().textContent = user.username || 'N/A';
+                    row.insertCell().textContent = user.email;
+                    row.insertCell().textContent = user.role ? user.role.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase()) : 'N/A';
+                    const actionsCell = row.insertCell(); actionsCell.classList.add('text-center');
+                    actionsCell.innerHTML = `
+                        <button class="btn btn-sm btn-outline-secondary me-1 btn-edit-user-admin" data-email="${user.email}" title="Edit User (Future)" disabled><i class="bi bi-pencil"></i></button>
+                        <button class="btn btn-sm btn-outline-danger btn-delete-user-admin" data-email="${user.email}" title="Delete User"><i class="bi bi-trash"></i></button>`;
+                });
+            } else { if(noUsersMessage) noUsersMessage.style.display = 'block'; }
+             if(userCountDisplay) userCountDisplay.textContent = users.length; // Update count directly here
+        } catch (error) {
+            userTableBody.innerHTML = '<tr><td colspan="4" class="text-center text-danger">Error loading users.</td></tr>';
+            console.error("Load users error:", error);
+            showFlashMessage(`Error loading users: ${error.message}`, 'danger');
+             if(userCountDisplay) userCountDisplay.textContent = 'Err';
+        }
+    }
+    if (createUserFormInner && createUserModalInstance) { /* ... (keep implementation) ... */ 
+        createUserFormInner.addEventListener('submit', async function(event) {
+            event.preventDefault(); event.stopPropagation();
+            hideAlert(createUserFormAlert); if(roleSelectFeedback) roleSelectFeedback.classList.add('d-none');
+            const roleRadio = this.querySelector('input[name="userRole"]:checked');
+            if (!this.checkValidity() || !roleRadio) {
+                this.classList.add('was-validated');
+                if(!roleRadio && roleSelectFeedback) { roleSelectFeedback.textContent = 'Please select a role.'; roleSelectFeedback.classList.remove('d-none');}
+                return;
+            }
+            this.classList.remove('was-validated');
+            const payload = {
+                username: document.getElementById('newUsername').value.trim(),
+                email: document.getElementById('newUserEmail').value.trim(),
+                password: document.getElementById('newUserPassword').value,
+                role: roleRadio.value
+            };
+            toggleButtonSpinner(submitCreateUserBtn, true);
+            try {
+                const response = await fetch('/api/admin/manage_users', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload)  ,credentials: 'same-origin'});
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.error || "Failed to create user.");
+                loadAdminUsers(); createUserModalInstance.hide(); showFlashMessage(result.message, 'success');
+            } catch (error) { showAlert(createUserFormAlert, error.message);
+            } finally { toggleButtonSpinner(submitCreateUserBtn, false); }
+        });
+    }
+    if (userTableBody) { /* ... (keep delete implementation, edit part remains commented/disabled) ... */ 
+        userTableBody.addEventListener('click', async (event) => {
+            const deleteBtn = event.target.closest('.btn-delete-user-admin');
+            if (deleteBtn) {
+                const email = deleteBtn.dataset.email;
+                if (confirm(`Are you sure you want to delete user ${email}?`)) {
+                    toggleButtonSpinner(deleteBtn, true);
+                    try {
+                        const response = await fetch(`/api/admin/manage_users/${encodeURIComponent(email)}`, {method: 'DELETE' , 
+                        credentials: 'same-origin'});
+                        const result = await response.json();
+                        if(!response.ok) throw new Error(result.error || "Delete failed");
+                        loadAdminUsers(); showFlashMessage(result.message, 'success');
+                    } catch (error) { showFlashMessage(`Error: ${error.message}`, 'danger');
+                    } finally { toggleButtonSpinner(deleteBtn, false); }
+                }
+            }
+        });
+    }
+    if(createUserModalEl) { /* ... (keep implementation) ... */ 
+        createUserModalEl.addEventListener('hidden.bs.modal', () => {
+            if(createUserFormInner) { createUserFormInner.reset(); createUserFormInner.classList.remove('was-validated'); }
+            hideAlert(createUserFormAlert); if(roleSelectFeedback) roleSelectFeedback.classList.add('d-none');
+        });
+    }
+
+    // --- "Configure Fields" Modal Logic ---
+    document.querySelectorAll('.btn-configure-extraction').forEach(button => { /* ... (keep implementation) ... */ 
+        button.addEventListener('click', function() {
+            const configType = this.dataset.configType; // 'po' or 'ats'
+            if(currentConfigTypeInput) currentConfigTypeInput.value = configType;
+            if(configureFieldsModalLabel) configureFieldsModalLabel.textContent = `Configure ${configType.toUpperCase()} Fields for Admin Panel`;
+            if(masterFieldsCheckboxList) {
+                masterFieldsCheckboxList.innerHTML = ''; 
+                const fieldsForType = ADMIN_CONFIGURABLE_FIELDS_PY[configType] || [];
+                const currentlyConfiguredLabels = adminConfiguredFields[configType] || [];
+                if (fieldsForType.length === 0) { masterFieldsCheckboxList.innerHTML = '<p class="text-muted">No predefined fields available.</p>'; return; }
+                fieldsForType.forEach(field => {
+                    const isChecked = currentlyConfiguredLabels.includes(field.label);
+                    masterFieldsCheckboxList.insertAdjacentHTML('beforeend', `
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" value="${escapeHTML(field.label)}" id="cfg-field-${configType}-${field.id}" ${isChecked ? 'checked' : ''}>
+                            <label class="form-check-label" for="cfg-field-${configType}-${field.id}">
+                                ${escapeHTML(field.label)}
+                                <small class="field-description-modal">${escapeHTML(field.description)}</small>
+                            </label>
+                        </div>`);
+                });
+            }
+        });
+    });
+    if (saveFieldConfigurationBtn) { /* ... (keep implementation) ... */ 
+        saveFieldConfigurationBtn.addEventListener('click', () => {
+            const type = currentConfigTypeInput.value;
+            const selectedLabels = [];
+            if(masterFieldsCheckboxList) masterFieldsCheckboxList.querySelectorAll('input[type="checkbox"]:checked').forEach(cb => selectedLabels.push(cb.value));
+            adminConfiguredFields[type] = selectedLabels;
+            if (configureFieldsModalInstance) configureFieldsModalInstance.hide();
+            showFlashMessage(`${type.toUpperCase()} field configuration updated.`, 'success');
+            if (type === 'po') renderPODataEntryFields();
+            if (type === 'ats') setupManageAtsCriteriaSection(); 
+            updateDashboardCounts(); // Though counts for PO/ATS config itself aren't directly on dashboard
+        });
+    }
+
+    // --- "Add PO Data to Database" Section ---
+    function renderPODataEntryFields() { /* ... (keep implementation) ... */ 
+        if (!poDataEntryFieldsList || !poDataEntryPlaceholder || !savePODataContainer) return;
+        poDataEntryFieldsList.innerHTML = '';
+        const poFieldsToEnter = adminConfiguredFields.po || [];
+        if (poFieldsToEnter.length === 0) {
+            poDataEntryPlaceholder.style.display = 'block'; savePODataContainer.style.display = 'none'; return;
+        }
+        poDataEntryPlaceholder.style.display = 'none'; savePODataContainer.style.display = 'flex';
+        poFieldsToEnter.forEach(label => {
+            const fieldDef = (ADMIN_CONFIGURABLE_FIELDS_PY.po || []).find(f => f.label === label);
+            const inputId = `po-entry-${fieldDef ? fieldDef.id : label.replace(/\W+/g, '-')}`;
+            poDataEntryFieldsList.insertAdjacentHTML('beforeend', `
+                <div class="col-md-6 extraction-input-group">
+                    <label for="${inputId}" class="form-label">${escapeHTML(label)}${fieldDef && fieldDef.label === "PO Number" ? "*" : ""}</label>
+                    <input type="text" class="form-control form-control-sm" id="${inputId}" name="${escapeHTML(label)}" placeholder="Enter ${escapeHTML(label)}" ${fieldDef && fieldDef.label === "PO Number" ? "required" : ""}>
+                    ${fieldDef && fieldDef.description ? `<small class="form-text text-muted">${escapeHTML(fieldDef.description)}</small>` : ''}
+                </div>`);
+        });
+    }
+    if (poDataEntryForm) { /* ... (keep implementation, ensure PO Number is validated) ... */ 
+        poDataEntryForm.addEventListener('submit', async (event) => {
+            event.preventDefault(); event.stopPropagation();
+            hideAlert(poDataFormAlert);
+            if (!poDataEntryForm.checkValidity()) {
+                poDataEntryForm.classList.add('was-validated');
+                showAlert(poDataFormAlert, 'Please fill all required fields (PO Number).', 'warning');
+                return;
+            }
+            poDataEntryForm.classList.remove('was-validated');
+
+            const formData = new FormData(poDataEntryForm);
+            const poData = {}; let poNumberProvided = false;
+            for (let [key, value] of formData.entries()) {
+                poData[key] = value.trim();
+                if (key === "PO Number" && value.trim()) poNumberProvided = true;
+            }
+            if (!poNumberProvided) { showAlert(poDataFormAlert, 'PO Number is required to save the entry.', 'warning'); return; }
+            
+            toggleButtonSpinner(submitPODataBtn, true);
+            try {
+                const response = await fetch('/api/admin/po_database_entry', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(poData),credentials: 'same-origin'
+                });
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.error || "Failed to save PO data.");
+                showFlashMessage(result.message, 'success');
+                poDataEntryForm.reset(); 
+                updateDashboardCounts(); // Update PO DB count
+            } catch (error) { showAlert(poDataFormAlert, `Error: ${error.message}`, 'danger');
+            } finally { toggleButtonSpinner(submitPODataBtn, false); }
+        });
+    }
+
+    // --- "Manage ATS Criteria" Section (Implementations for ATS criteria functions) ---
+    function setupManageAtsCriteriaSection() {
+        renderATSFieldsForCriteriaDropdown();
+        loadATSCriteria();
+    }
+    function renderATSFieldsForCriteriaDropdown() { /* ... (keep implementation) ... */ 
+        if (!atsCriterionFieldLabelSelect || !noAtsFieldsForCriteriaMsg) return;
+        atsCriterionFieldLabelSelect.innerHTML = '<option value="" selected disabled>-- Select ATS Field --</option>';
+        const atsFieldsForCriteria = adminConfiguredFields.ats || [];
+        if (atsFieldsForCriteria.length === 0) {
+            if(noAtsFieldsForCriteriaMsg) noAtsFieldsForCriteriaMsg.style.display = 'block'; 
+            if(openAddAtsCriterionModalBtn) openAddAtsCriterionModalBtn.disabled = true; return;
+        }
+        if(noAtsFieldsForCriteriaMsg) noAtsFieldsForCriteriaMsg.style.display = 'none'; 
+        if(openAddAtsCriterionModalBtn) openAddAtsCriterionModalBtn.disabled = false;
+        atsFieldsForCriteria.forEach(label => {
+            const fieldDef = (ADMIN_CONFIGURABLE_FIELDS_PY.ats || []).find(f => f.label === label);
+            if (fieldDef) atsCriterionFieldLabelSelect.insertAdjacentHTML('beforeend', `<option value="${escapeHTML(label)}">${escapeHTML(label)}</option>`);
+        });
+    }
+    async function loadATSCriteria() { /* ... (keep implementation - calls renderATSCriterionRow) ... */
+      credentials: 'same-origin'
+        if (!atsCriteriaTableBody || !noAtsCriteriaRow) return;
+        atsCriteriaTableBody.innerHTML = '<tr><td colspan="5" class="text-center text-muted py-3"><div class="spinner-border spinner-border-sm"></div> Loading criteria...</td></tr>';
+        try {
+            const response = await fetch('/api/admin/ats_criteria');
+            if (!response.ok) throw new Error(`HTTP error ${response.status}`);
+            loadedAtsCriteria = await response.json(); // Store as {field_label: [crits]}
+            atsCriteriaTableBody.innerHTML = ''; let hasCriteria = false;
+            for (const fieldLabel in loadedAtsCriteria) {
+                if (loadedAtsCriteria[fieldLabel] && loadedAtsCriteria[fieldLabel].length > 0) {
+                    loadedAtsCriteria[fieldLabel].forEach(crit => { renderATSCriterionRow(crit); hasCriteria = true; });
+                }
+            }
+            if(noAtsCriteriaRow) noAtsCriteriaRow.style.display = hasCriteria ? 'none' : 'table-row';
+            updateDashboardCounts(); // Update ATS criteria count
+        } catch (error) { 
+            atsCriteriaTableBody.innerHTML = '<tr><td colspan="5" class="text-center text-danger">Error loading criteria.</td></tr>'; 
+            console.error("Load ATS criteria error:", error);
+            showFlashMessage(`Error loading ATS criteria: ${error.message}`, 'danger');
+        }
+    }
+    function renderATSCriterionRow(criterion) {
+        if (!atsCriteriaTableBody) return;
+        const row = atsCriteriaTableBody.insertRow();
+        row.dataset.criterionId = criterion.id;
+        row.dataset.fieldLabel = criterion.field_label;
+
+        row.insertCell().textContent = criterion.field_label;
+        row.insertCell().textContent = criterion.condition_type.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+        
+        let valueDisplay = '';
+        if (criterion.condition_type === 'range_numeric') valueDisplay = `Min: ${criterion.value1}, Max: ${criterion.value2}`;
+        else if (criterion.condition_type === 'contains_any') valueDisplay = (criterion.keywords || []).join(', ');
+        else if (criterion.condition_type === 'is_one_of') valueDisplay = (criterion.options || []).join(', ');
+        else valueDisplay = criterion.value1 || 'N/A';
+        const valueCell = row.insertCell();
+        valueCell.innerHTML = `<span class="value-display-ats" title="${escapeHTML(valueDisplay)}">${escapeHTML(valueDisplay)}</span>`;
+
+        row.insertCell().innerHTML = `<span class="badge bg-${criterion.is_active ? 'success' : 'secondary'}">${criterion.is_active ? 'Active' : 'Inactive'}</span>`;
+        
+        const actionsCell = row.insertCell();
+        actionsCell.classList.add('text-center');
+        actionsCell.innerHTML = `
+            <button class="btn btn-sm btn-outline-primary me-1 btn-edit-ats-criterion" title="Edit Criterion"><i class="bi bi-pencil-square"></i></button>
+            <button class="btn btn-sm btn-outline-danger btn-delete-ats-criterion" title="Delete Criterion"><i class="bi bi-trash"></i></button>`;
+    }
+    if (openAddAtsCriterionModalBtn) { /* ... (keep implementation - resets form for "Add") ... */ 
+        openAddAtsCriterionModalBtn.addEventListener('click', () => {
+            editingCriterionId = null; // Ensure it's for adding new
+            if(atsCriterionModalLabel) atsCriterionModalLabel.textContent = 'Add New ATS Criterion';
+            if(atsCriterionForm) atsCriterionForm.reset();
+            if(atsCriterionIdInput) atsCriterionIdInput.value = '';
+            renderCriterionValueInputs(); // Clear/reset value inputs
+            hideAlert(atsCriterionFormAlert);
+            if(atsCriterionFieldLabelSelect) atsCriterionFieldLabelSelect.disabled = false; // Enable field selection
+        });
+    }
+    if(atsCriterionConditionTypeSelect) { /* ... (keep implementation - calls renderCriterionValueInputs) ... */ 
+        atsCriterionConditionTypeSelect.addEventListener('change', renderCriterionValueInputs);
+    }
+    function renderCriterionValueInputs() { /* ... (keep implementation from previous) ... */ 
+        if (!atsCriterionValuesContainer || !atsCriterionConditionTypeSelect) return;
+        atsCriterionValuesContainer.innerHTML = ''; // Clear previous
+        const condition = atsCriterionConditionTypeSelect.value;
+        let html = '';
+
+        if (condition === 'range_numeric') {
+            html = `
+                <div class="row">
+                    <div class="col-md-6 mb-2"><label class="form-label small">Min Value*</label><input type="number" class="form-control form-control-sm" name="value1" required></div>
+                    <div class="col-md-6 mb-2"><label class="form-label small">Max Value*</label><input type="number" class="form-control form-control-sm" name="value2" required></div>
+                </div>`;
+        } else if (condition === 'min_numeric' || condition === 'max_numeric') {
+            html = `<div class="mb-2"><label class="form-label small">Value*</label><input type="number" class="form-control form-control-sm" name="value1" required></div>`;
+        } else if (condition === 'contains_any') {
+            html = `<div class="mb-2"><label class="form-label small">Keywords (comma-separated)*</label><input type="text" class="form-control form-control-sm" name="keywords_text" placeholder="e.g., java, python, leadership" required></div>`;
+        } else if (condition === 'is_one_of') {
+            html = `<div class="mb-2"><label class="form-label small">Options (comma-separated)*</label><input type="text" class="form-control form-control-sm" name="options_text" placeholder="e.g., London, Paris, Berlin" required></div>`;
+        } else if (condition === 'equals_string') {
+            html = `<div class="mb-2"><label class="form-label small">String Value*</label><input type="text" class="form-control form-control-sm" name="value1" required></div>`;
+        }
+        atsCriterionValuesContainer.innerHTML = html;
+    }
+    if (atsCriterionForm) { /* ... (keep implementation - handles both Add and Edit) ... */ 
+        atsCriterionForm.addEventListener('submit', async function(event) {
+            event.preventDefault(); event.stopPropagation();
+            hideAlert(atsCriterionFormAlert);
+            if (!this.checkValidity()) { this.classList.add('was-validated'); return; }
+            this.classList.remove('was-validated');
+
+            const fieldLabel = atsCriterionFieldLabelSelect.value;
+            const conditionType = atsCriterionConditionTypeSelect.value;
+            const isActive = atsCriterionIsActiveCheckbox.checked;
+            let payload = { field_label: fieldLabel, condition_type: conditionType, is_active: isActive };
+
+            if (conditionType === 'range_numeric') {
+                payload.value1 = this.elements.value1.value; payload.value2 = this.elements.value2.value;
+            } else if (conditionType === 'min_numeric' || conditionType === 'max_numeric' || conditionType === 'equals_string') {
+                payload.value1 = this.elements.value1.value;
+            } else if (conditionType === 'contains_any') {
+                payload.keywords = this.elements.keywords_text.value.split(',').map(k => k.trim()).filter(k => k);
+            } else if (conditionType === 'is_one_of') {
+                payload.options = this.elements.options_text.value.split(',').map(o => o.trim()).filter(o => o);
+            }
+            
+            let url = '/api/admin/ats_criteria';
+            let method = 'POST';
+            if (editingCriterionId && atsCriterionIdInput.value) { // If editing
+                url = `/api/admin/ats_criteria/${encodeURIComponent(fieldLabel)}/${encodeURIComponent(atsCriterionIdInput.value)}`;
+                method = 'PUT';
+                payload.id = atsCriterionIdInput.value; // Send ID for matching, though backend uses URL
+            }
+
+            toggleButtonSpinner(saveAtsCriterionBtn, true);
+            try {
+                const response = await fetch(url, { method: method, headers: {'Content-Type': 'application/json'}, body: JSON.stringify(payload),credentials: 'same-origin' });
+                const result = await response.json();
+                if (!response.ok) throw new Error(result.error || "Failed to save criterion.");
+                loadATSCriteria(); 
+                if (atsCriterionModalInstance) atsCriterionModalInstance.hide();
+                showFlashMessage(result.message, 'success');
+            } catch (error) { showAlert(atsCriterionFormAlert, error.message);
+            } finally { toggleButtonSpinner(saveAtsCriterionBtn, false); }
+        });
+    }
+    if (atsCriteriaTableBody) { /* ... (keep implementation - handles Edit and Delete button clicks) ... */ 
+        atsCriteriaTableBody.addEventListener('click', async (event) => {
+            const editBtn = event.target.closest('.btn-edit-ats-criterion');
+            const deleteBtn = event.target.closest('.btn-delete-ats-criterion');
+
+            if (editBtn) {
+                const row = editBtn.closest('tr');
+                editingCriterionId = row.dataset.criterionId;
+                const fieldLabel = row.dataset.fieldLabel;
+                const criterionToEdit = (loadedAtsCriteria[fieldLabel] || []).find(c => c.id === editingCriterionId);
+                if (!criterionToEdit) { showFlashMessage("Could not find criterion to edit.", "danger"); return; }
+
+                if(atsCriterionModalLabel) atsCriterionModalLabel.textContent = 'Edit ATS Criterion';
+                if(atsCriterionForm) atsCriterionForm.reset(); // Clear previous states
+                hideAlert(atsCriterionFormAlert);
+                
+                atsCriterionIdInput.value = criterionToEdit.id;
+                atsCriterionFieldLabelSelect.value = criterionToEdit.field_label;
+                atsCriterionFieldLabelSelect.disabled = true; // Field label cannot be changed during edit
+                atsCriterionConditionTypeSelect.value = criterionToEdit.condition_type;
+                atsCriterionIsActiveCheckbox.checked = criterionToEdit.is_active;
+                
+                renderCriterionValueInputs(); // Render inputs for the condition type
+
+                // Populate values
+                if (criterionToEdit.condition_type === 'range_numeric') {
+                    atsCriterionForm.elements.value1.value = criterionToEdit.value1;
+                    atsCriterionForm.elements.value2.value = criterionToEdit.value2;
+                } else if (['min_numeric', 'max_numeric', 'equals_string'].includes(criterionToEdit.condition_type)) {
+                    atsCriterionForm.elements.value1.value = criterionToEdit.value1;
+                } else if (criterionToEdit.condition_type === 'contains_any') {
+                    atsCriterionForm.elements.keywords_text.value = (criterionToEdit.keywords || []).join(', ');
+                } else if (criterionToEdit.condition_type === 'is_one_of') {
+                    atsCriterionForm.elements.options_text.value = (criterionToEdit.options || []).join(', ');
+                }
+                if(atsCriterionModalInstance) atsCriterionModalInstance.show();
+            } else if (deleteBtn) {
+                const row = deleteBtn.closest('tr');
+                const criterionId = row.dataset.criterionId;
+                const fieldLabel = row.dataset.fieldLabel;
+                if (confirm(`Delete criterion for field "${fieldLabel}"?`)) {
+                    toggleButtonSpinner(deleteBtn, true);
+                    try {
+                        const response = await fetch(`/api/admin/ats_criteria/${encodeURIComponent(fieldLabel)}/${encodeURIComponent(criterionId)}`, {method: 'DELETE',credentials: 'same-origin'});
+                        const result = await response.json();
+                        if (!response.ok) throw new Error(result.error || "Delete failed.");
+                        loadATSCriteria(); showFlashMessage(result.message, 'success');
+                    } catch (error) { showFlashMessage(`Error: ${error.message}`, 'danger');
+                    } finally { toggleButtonSpinner(deleteBtn, false); }
+                }
+            }
+        });
+    }
+    if(atsCriterionModalEl) { /* ... (keep implementation - re-enable field label select on hide) ... */ 
+        atsCriterionModalEl.addEventListener('hidden.bs.modal', () => { 
+            if(atsCriterionFieldLabelSelect) atsCriterionFieldLabelSelect.disabled = false; 
+            if(atsCriterionForm) atsCriterionForm.classList.remove('was-validated');
+            editingCriterionId = null; // Reset editing state
+        });
+    }
+
+    // --- Dashboard Counts Update ---
+    function updateDashboardCounts() {
+        // User Count (already updated within loadAdminUsers)
+        // PO DB Count
+        if (poDbCountDisplay) {
+            fetch('/api/admin/po_database_count' , { credentials: 'same-origin' }).then(r => r.ok ? r.json() : Promise.reject(r.statusText))
+                .then(data => poDbCountDisplay.textContent = data.count !== undefined ? data.count : 'Err')
+                .catch(() => poDbCountDisplay.textContent = 'Err');
+        }
+        // ATS Criteria Count
+        if (atsCriteriaCountDisplay) {
+            fetch('/api/admin/ats_criteria_count',{ credentials: 'same-origin' }).then(r => r.ok ? r.json() : Promise.reject(r.statusText))
+                .then(data => atsCriteriaCountDisplay.textContent = data.active_count !== undefined ? data.active_count : 'Err')
+                .catch(() => atsCriteriaCountDisplay.textContent = 'Err');
+        }
+    }
+
+
+                async function loadAndDisplayExistingPOData() {
+                     console.log("loadAndDisplayExistingPOData function EXECUTED.");
+                    const tableBody = document.getElementById('existingPoDataTableBody');
+                    const tableHeadRow = document.querySelector('#existingPoDataTable thead tr');
+                    const noDataRow = document.getElementById('no-existing-po-data-row');
+                    const existingPoDataAlert = document.getElementById('existing-po-data-alert');
+
+                    if (!tableBody || !tableHeadRow || !noDataRow) return;
+
+                    hideAlert(existingPoDataAlert);
+                    tableBody.innerHTML = `<tr><td colspan="10" class="text-center text-muted py-3"><div class="spinner-border spinner-border-sm"></div> Loading existing PO data...</td></tr>`; // Colspan large enough
+
+                    try {
+                        const response = await fetch('/api/admin/po_database_entries', { credentials: 'same-origin' });
+                            if (!response.ok) throw new Error(`Failed to load existing PO data: ${response.statusText} (Status: ${response.status})`); // Added status
+                            const poEntries = await response.json();
+
+                        tableBody.innerHTML = ''; // Clear loading message
+                        tableHeadRow.innerHTML = ''; // Clear old headers
+
+                        if (poEntries.length === 0) {
+                            if (noDataRow) noDataRow.style.display = 'table-row';
+                            tableHeadRow.innerHTML = '<th>Info</th>'; // Placeholder header
+                            tableBody.innerHTML = '<tr><td class="text-center text-muted py-3">No PO data found in the database.</td></tr>';
+                            return;
+                        }
+
+                        if (noDataRow) noDataRow.style.display = 'none';
+
+                        // Determine table headers dynamically from the first entry,
+                        // prioritizing configured fields, then PO Number, then others.
+                        const configuredPOFields = adminConfiguredFields.po || [];
+                            let headers = [];
+                            if (configuredPOFields.includes("PO Number")) {
+                                headers.push("PO Number");
+                            } else if (poEntries.length > 0 && "PO Number" in poEntries[0] && !headers.includes("PO Number")) {
+                                headers.push("PO Number");
+                            }
+
+                        configuredPOFields.forEach(label => {
+                            if (label !== "PO Number" && !headers.includes(label)) {
+                                headers.push(label);
+                            }
+                        });
+                        // Add any other fields present in data but not in configured (less common for admin entry)
+                        Object.keys(poEntries[0]).forEach(key => {
+                            if (!headers.includes(key) && key !== "PO Number") { // PO Number already handled
+                                // Optional: only add if it's part of MASTER_FIELD_DEFINITIONS.po
+                                if ((ADMIN_CONFIGURABLE_FIELDS_PY.po || []).some(f => f.label === key)) {
+                                    headers.push(key);
+                                }
+                            }
+                        });
+
+
+                        if (headers.length === 0 && poEntries.length > 0) { // Fallback if no headers derived but data exists
+                            headers = Object.keys(poEntries[0]);
+                        }
+                        
+                        headers.forEach(header => {
+                            const th = document.createElement('th');
+                            th.textContent = header;
+                            tableHeadRow.appendChild(th);
+                        });
+                        tableHeadRow.appendChild(document.createElement('th')).textContent = 'Actions'; // Actions column
+
+                        poEntries.forEach(entry => {
+                            const row = tableBody.insertRow();
+                            headers.forEach(header => {
+                                row.insertCell().textContent = entry[header] !== undefined ? entry[header] : 'N/A';
+                            });
+                            const actionsCell = row.insertCell();
+                            actionsCell.classList.add('text-center');
+                            const editButton = document.createElement('button');
+                            editButton.classList.add('btn', 'btn-sm', 'btn-outline-primary', 'btn-edit-existing-po');
+                            editButton.innerHTML = '<i class="bi bi-pencil-square"></i>';
+                            editButton.title = 'Edit PO Entry';
+                            editButton.addEventListener('click', () => populatePOFormForEdit(entry));
+                            actionsCell.appendChild(editButton);
+                            // Optional: Add a delete button here if needed
+                        });
+
+                    } catch (error) {
+                        console.error("Error loading existing PO data:", error);
+                        showAlert(existingPoDataAlert, `Error: ${error.message}`, 'danger');
+                        tableBody.innerHTML = `<tr><td colspan="${(tableHeadRow.cells.length || 1)}" class="text-center text-danger">Failed to load PO data.</td></tr>`;
+                    }
+                }
+              
+            function populatePOFormForEdit(poEntry) {
+    const poDataEntryForm = document.getElementById('poDataEntryForm');
+    const poDataEntryFieldsList = document.getElementById('po-data-entry-fields-list'); // Parent of input fields
+    const savePODataContainer = document.getElementById('savePODataContainer');
+    const poDataEntryPlaceholder = document.getElementById('po-data-entry-placeholder');
+
+
+    if (!poDataEntryForm || !poDataEntryFieldsList) {
+        console.error("PO Data Entry form or fields list container not found.");
+        showFlashMessage("Error: UI elements for editing PO are missing.", "danger");
+        return;
+    }
+
+    // 1. Ensure the form fields match the current adminConfiguredFields.po
+    // This function re-renders the input fields based on adminConfiguredFields.po
+    // It will clear any previous dynamic content in poDataEntryFieldsList.
+    renderPODataEntryFields(); 
+
+    // 2. Now that fields are rendered according to current config, populate them.
+    // Iterate over the `adminConfiguredFields.po` which dictates what inputs are in the form.
+    const configuredFieldsForEntry = adminConfiguredFields.po || [];
+
+    if (configuredFieldsForEntry.length === 0) {
+        if (poDataEntryPlaceholder) poDataEntryPlaceholder.style.display = 'block';
+        if (savePODataContainer) savePODataContainer.style.display = 'none';
+        showFlashMessage("No PO fields are configured for data entry. Cannot populate form.", "warning");
+        return;
+    }
+
+    if (poDataEntryPlaceholder) poDataEntryPlaceholder.style.display = 'none';
+
+
+    configuredFieldsForEntry.forEach(label => {
+        // Construct the ID that renderPODataEntryFields would have created for this label
+        const fieldDef = (ADMIN_CONFIGURABLE_FIELDS_PY.po || []).find(f => f.label === label);
+        const inputId = `po-entry-${fieldDef ? fieldDef.id : label.replace(/\W+/g, '-')}`;
+        const inputElement = document.getElementById(inputId);
+
+        if (inputElement) {
+            if (poEntry.hasOwnProperty(label)) {
+                inputElement.value = poEntry[label];
+            } else {
+                inputElement.value = ''; // Clear if field not in this specific PO entry's data
+            }
+        } else {
+            console.warn(`Input element with ID '${inputId}' for label '${label}' not found in the form.`);
+        }
+    });
+
+    // 3. Make the form and save button visible
+    if (savePODataContainer) {
+        savePODataContainer.style.display = 'flex';
+    }
+
+    // 4. Provide user feedback and focus
+    // Scroll to the form for better UX
+    const sectionHeader = document.querySelector('#add_po_data-section h2');
+    if (sectionHeader) {
+        sectionHeader.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } else {
+        poDataEntryForm.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+    
+    // Use a more prominent alert or update a status text near the form
+    const poDataFormAlert = document.getElementById('poDataFormAlert');
+    if (poDataFormAlert) {
+        showAlert(poDataFormAlert, `Editing PO: ${poEntry["PO Number"] || 'Unknown PO'}. Modify details above and click "Save PO Data".`, 'info');
+    } else {
+        showFlashMessage(`Editing PO: ${poEntry["PO Number"] || 'Unknown PO'}. Make changes and click "Save PO Data".`, 'info', 10000);
+    }
+    
+    // Optional: Focus the first input field in the PO form
+    const firstInputInForm = poDataEntryFieldsList.querySelector('input.form-control');
+    if (firstInputInForm) {
+        firstInputInForm.focus();
+    }
+}
+           
+    
+    
+  // Initial Setup
+    renderPODataEntryFields(); // Render based on default/loaded configured fields
+    setupManageAtsCriteriaSection(); // Setup ATS criteria dropdown and load existing
+    showSection('dashboard-section'); // Show dashboard, which also calls updateDashboardCounts
+
+});
+
+
+   
+</script>
+</body>
+</html>

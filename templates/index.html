@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Enhanced OCR Text Extractor</title>
+    <!-- Bootstrap CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { padding-top: 20px; background-color: #f8f9fa; }
+        .container { max-width: 1200px; margin: auto; } /* Wider container */
+        .result-container { margin-bottom: 20px; border: 1px solid #dee2e6; border-radius: 0.25rem; padding: 15px; background-color: #fff; box-shadow: 0 0.125rem 0.25rem rgba(0,0,0,.075); }
+        .result-title { font-weight: bold; color: #007bff; margin-bottom: 10px; }
+        pre { white-space: pre-wrap; background-color: #f8f9fa; border: 1px solid #ced4da; border-radius: 0.25rem; padding: 10px; overflow-x: auto; }
+        .error-message { color: #dc3545; margin-top: 10px; }
+        .accuracy-good { color: green; font-weight: bold; }
+        .accuracy-moderate { color: orange; font-weight: bold; }
+        .accuracy-bad { color: red; font-weight: bold; }
+        .mismatch-table { width: 100%; margin-top: 10px; border-collapse: collapse; }
+        .mismatch-table th, .mismatch-table td { border: 1px solid #ced4da; padding: 8px; text-align: left; }
+        .mismatch-table th { background-color: #f0f0f0; }
+        .data-display-box { border: 1px solid #ced4da; border-radius: 0.25rem; padding: 10px; background-color: #f8f9fa; margin-bottom: 10px; } /* Box for data display */
+        .data-label { font-weight: bold; } /* Label for data fields */
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-light bg-light fixed-top">
+        <div class="container">
+            <a class="navbar-brand" href="#">OCR Text Extractor</a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav" aria-controls="navbarNav" aria-expanded="false" aria-label="Toggle navigation">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav">
+                    <!-- <li class="nav-item">
+                        <a class="nav-link active" aria-current="page" href="#">Home</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#">About</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#">Contact</a>
+                    </li> -->
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-5">
+        <h1 class="text-center mb-4">Enhanced OCR Text Extractor</h1>
+
+        <form method="POST" enctype="multipart/form-data" class="mb-4">
+            <div class="mb-3">
+                <label for="formFileMultiple" class="form-label">Upload one or more image or document files (Images, PDFs, DOCX):</label>
+                <input class="form-control" type="file" id="formFileMultiple" name="image" accept="image/*,.pdf,.docx" multiple required>
+            </div>
+            <div class="d-grid gap-2">
+                <button type="submit" class="btn btn-primary btn-lg">Extract Text and Compare</button>
+            </div>
+        </form>
+
+        {% if results %}
+            {% for filename, result_data in results.items() %}
+                <div class="result-container">
+                    <h2 class="result-title">Results for: {{ filename }}</h2>
+                    {% if 'error' in result_data %}
+                        <p class="error-message">{{ result_data['error'] }}</p>
+                    {% else %}
+                        <h3>Extracted Text:</h3>
+                        <pre>{{ result_data['extracted_text'] }}</pre>
+
+                        <div class="row"> {# Bootstrap row for side-by-side layout #}
+                            <div class="col-md-6"> {# Left column for Extracted Data #}
+                                <h4>Extracted Data:</h4>
+                                <div class="data-display-box">
+                                    {% if result_data['structured_data'] %}
+                                        <dl> {# Definition list for structured data #}
+                                            {% for field_name in ["Sr no.", "Name", "City", "Age", "Country", "Address"] %}
+                                                <dt class="data-label">{{ field_name }}:</dt>
+                                                <dd>{{ result_data['structured_data'].get(field_name) | default('N/A') }}</dd> {# Display specific fields #}
+                                            {% endfor %}
+                                        </dl>
+                                    {% else %}
+                                        <p>No structured data extracted.</p>
+                                    {% endif %}
+                                </div>
+                            </div>
+
+                            <div class="col-md-6"> {# Right column for Database Data #}
+                                <h4>Database Data:</h4>
+                                <div class="data-display-box">
+                                    {% if result_data['structured_data'] and result_data['structured_data'].get("Sr no.") %}
+                                        {% set sr_no = result_data['structured_data']["Sr no."] %}
+                                        {% set db_data = get_database_data(sr_no) %}
+                                        {% if db_data %}
+                                            <dl> {# Definition list for database data #}
+                                                {% for field_name in ["Sr no.", "Name", "City", "Age", "Country", "Address"] %}
+                                                    <dt class="data-label">{{ field_name }}:</dt>
+                                                    <dd>{{ db_data.get(field_name) | default('N/A') }}</dd> {# Display specific fields from database #}
+                                                {% endfor %}
+                                            </dl>
+                                        {% else %}
+                                            <p class="error-message">Sr no. "{{ sr_no }}" not found in database.</p>
+                                        {% endif %}
+                                    {% else %}
+                                        <p>Database data not applicable (no Sr no. extracted).</p>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div> {# End Bootstrap row #}
+
+
+                        {% if result_data['accuracy'] is not none %}
+                            <h3>Comparison with Database:</h3>
+                            {% if result_data['comparison_error'] %}
+                                <p class="error-message">{{ result_data['comparison_error'] }}</p>
+                            {% else %}
+                                <p>Accuracy:
+                                    {% if result_data['accuracy'] > 90 %}
+                                        <span class="accuracy-good">Good ({{ "%.2f"|format(result_data['accuracy']) }}%)</span>
+                                    {% elif result_data['accuracy'] > 70 %}
+                                        <span class="accuracy-moderate">Moderate ({{ "%.2f"|format(result_data['accuracy']) }}%)</span>
+                                    {% else %}
+                                        <span class="accuracy-bad">Low ({{ "%.2f"|format(result_data['accuracy']) }}%)</span>
+                                    {% endif %}
+                                </p>
+
+                                {% if result_data['mismatched_fields'] %}
+                                    <h4>Mismatched Fields:</h4>
+                                    <table class="mismatch-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Field</th>
+                                                <th>Extracted Value</th>
+                                                <th>Database Value</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {% for field, mismatch in result_data['mismatched_fields'].items() %}
+                                                <tr>
+                                                    <td>{{ field }}</td>
+                                                    <td>{{ mismatch['extracted_value']|default('N/A', boolean=True) }}</td>
+                                                    <td>{{ mismatch['db_value'] }}</td>
+                                                </tr>
+                                            {% endfor %}
+                                        </tbody>
+                                    </table>
+                                {% else %}
+                                    <p>All fields matched!</p>
+                                {% endif %}
+                            {% endif %}
+                        {% endif %}
+                    {% endif %}
+                </div>
+            {% endfor %}
+        {% endif %}
+    </div>
+
+    <!-- Bootstrap Bundle with Popper -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{# --- Flash Messages Partial --- #}
+{% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+        <div class="flash-messages mb-3" id="flash-messages-container"> {# Ensure this ID matches JS if needed #}
+        {% for category, message in messages %}
+            {# Map categories to Bootstrap alert classes if needed #}
+            {% set alert_class = 'alert-' + category if category in ['success', 'danger', 'warning', 'info'] else 'alert-secondary' %}
+            <div class="alert {{ alert_class }} alert-dismissible fade show" role="alert">
+                {{ message | safe }} {# Use safe filter if message contains HTML like the temp password #}
+                <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+            </div>
+        {% endfor %}
+        </div>
+    {% endif %}
+{% endwith %}
+{# ----------------------------- #}

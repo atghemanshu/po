@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Dashboard | {{ current_tab_display_name }}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <style>
+        body { padding-top: 70px; background-color: #f8f9fa; } /* Increased padding for fixed navbar */
+        .navbar { background-color: #ffffff; border-bottom: 1px solid #dee2e6; box-shadow: 0 1px 3px rgba(0,0,0,0.04); }
+        .navbar-brand { color: #004671 !important; font-weight: 600; }
+        .container.main-content { max-width: 1200px; margin: auto; background-color: #ffffff; padding: 2rem; border-radius: 8px; margin-top: 2rem; border: 1px solid #dee2e6; }
+        .result-container { margin-top: 20px; border: 1px solid #e9ecef; border-radius: 0.25rem; padding: 15px; background-color: #f8f9fa; box-shadow: 0 1px 2px rgba(0,0,0,0.05); }
+        .result-title { font-weight: bold; color: #004671; margin-bottom: 10px; font-size: 1.2rem; display: flex; justify-content: space-between; align-items: center;}
+        pre { white-space: pre-wrap; background-color: #e9ecef; border: 1px solid #ced4da; border-radius: 0.25rem; padding: 10px; font-size: 0.85rem; max-height: 250px; overflow-y: auto; }
+        .error-message { color: #dc3545; margin-top: 10px; font-weight: 500; }
+        .accuracy-good { color: #198754; font-weight: bold; }
+        .accuracy-moderate { color: #ffc107; font-weight: bold; } /* Text might need to be darker for yellow bg */
+        .accuracy-bad { color: #dc3545; font-weight: bold; }
+        .mismatch-table { width: 100%; margin-top: 10px; border-collapse: collapse; font-size: 0.9rem; }
+        .mismatch-table th, .mismatch-table td { border: 1px solid #dee2e6; padding: 8px; text-align: left; vertical-align: top; }
+        .mismatch-table th { background-color: #e9ecef; font-weight: 500; }
+        .data-display-box { border: 1px solid #dee2e6; border-radius: 0.25rem; padding: 15px; background-color: #fdfdff; margin-bottom: 10px; font-size: 0.9rem; }
+        .data-display-box dl { margin-bottom: 0; }
+        .data-display-box dt { font-weight: bold; color: #333; }
+        .data-display-box dd { margin-left: 1.5em; margin-bottom: 0.5em; color: #555; }
+        .nav-tabs .nav-link { color: #495057; border-bottom-width: 2px;}
+        .nav-tabs .nav-link.active { color: #004671; border-color: #dee2e6 #dee2e6 #ffffff; border-bottom: 3px solid #004671; font-weight: 500; }
+        .tab-content { border: 1px solid #dee2e6; border-top: none; padding: 1.5rem; background-color: #ffffff; border-radius: 0 0 4px 4px; }
+        .alert { font-size: 0.9rem; }
+        .failed-criterion { color: #dc3545; margin-bottom: 0.3rem; }
+        .passed-criterion { color: #198754; }
+        .criteria-list { padding-left: 0; list-style-type: none;}
+        .criteria-list li strong { color: #343a40; }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-light fixed-top">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="{{ url_for('landing_page') }}">Verification App</a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNavUser"><span class="navbar-toggler-icon"></span></button>
+            <div class="collapse navbar-collapse" id="navbarNavUser">
+                <ul class="navbar-nav me-auto mb-2 mb-lg-0"></ul>
+                <div class="d-flex align-items-center">
+                     <span class="navbar-text me-3"><i class="fas fa-user me-1"></i>{{ session.get('username', 'User') }} ({{ session.get('role', 'N/A').replace('_', ' ').title() }})</span>
+                     <a href="{{ url_for('logout') }}" class="btn btn-sm btn-outline-danger"><i class="fas fa-sign-out-alt me-1"></i>Logout</a>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container main-content mt-4">
+        <h1 class="text-center mb-4">User Verification Dashboard</h1>
+        {% include '_flash_messages.html' %}
+
+        {% if accessible_tabs_info and accessible_tabs_info|length > 0 %}
+            <ul class="nav nav-tabs mb-0" id="dashboardTabs" role="tablist">
+                {% for tab_id, tab_data in accessible_tabs_info.items() %}
+                <li class="nav-item" role="presentation">
+                    <button class="nav-link {{ 'active' if active_tab_id == tab_id }}" id="{{ tab_id }}-tab" data-bs-toggle="tab" data-bs-target="#{{ tab_id }}-pane" type="button" role="tab" aria-controls="{{ tab_id }}-pane" aria-selected="{{ 'true' if active_tab_id == tab_id else 'false' }}">
+                       <i class="{{ tab_data.icon }} me-1"></i>{{ tab_data.name }}
+                    </button>
+                </li>
+                {% endfor %}
+            </ul>
+
+            <div class="tab-content" id="dashboardTabsContent">
+                {% for tab_id, tab_data in accessible_tabs_info.items() %}
+                <div class="tab-pane fade {{ 'show active' if active_tab_id == tab_id }}" id="{{ tab_id }}-pane" role="tabpanel" aria-labelledby="{{ tab_id }}-tab">
+
+                    {# --- PO Verification Tab Content --- #}
+                    {% if tab_id == 'po' %}
+                    <h3 class="mb-3 mt-3"><i class="fas fa-file-invoice me-2"></i>Upload Purchase Orders</h3>
+                    <form method="POST" enctype="multipart/form-data" action="{{ url_for('app_dashboard') }}" class="mb-4">
+                        <input type="hidden" name="upload_type" value="po"><input type="hidden" name="active_tab_id" value="po">
+                        <div class="mb-3">
+                            <label for="poFiles" class="form-label">Select PO files (Images, PDFs, DOCX):</label>
+                            <input class="form-control" type="file" id="poFiles" name="document" accept="image/*,.pdf,.docx" multiple required>
+                        </div>
+                        <button type="submit" class="btn btn-primary"><i class="fas fa-cogs me-1"></i>Process PO Files</button>
+                    </form>
+                    {% if results and active_tab_id == 'po' %}
+                        {% for filename, res_data in results.items() %}
+                        <div class="result-container mb-4">
+                            <h4 class="result-title">
+                                <span>Results for: {{ filename }}</span>
+                                {% if not res_data.error %}
+                                <a href="{{ url_for('download_report', doc_type='po', filename_key=filename) }}" class="btn btn-sm btn-outline-secondary" target="_blank"><i class="bi bi-download me-1"></i>Download Report</a>
+                                {% endif %}
+                            </h4>
+                            {% if res_data.error %}
+                                <p class="error-message"><i class="fas fa-exclamation-triangle me-1"></i>{{ res_data.error }}</p>
+                            {% else %}
+                                <div class="mb-3"><h5><i class="fas fa-align-left me-1"></i>Extracted Text:</h5><pre>{{ res_data.extracted_text | default('N/A', true) }}</pre></div>
+                                <div class="row">
+                                    <div class="col-md-6 mb-3">
+                                        <h5><i class="fas fa-project-diagram me-1"></i>Extracted Data:</h5>
+                                        <div class="data-display-box">
+                                            {% if res_data.structured_data and res_data.structured_data|length > 0 %}
+                                                <dl>
+                                                {% for field_label in PO_FIELDS_FOR_USER_EXTRACTION %}
+                                                    {% if field_label in res_data.structured_data %}
+                                                    <dt>{{ field_label }}:</dt>
+                                                    <dd>{{ res_data.structured_data[field_label] | default('N/A', true) }}</dd>
+                                                    {% endif %}
+                                                {% endfor %}
+                                                </dl>
+                                            {% else %}
+                                                <p class="text-muted">No structured data extracted or available for display.</p>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                     <div class="col-md-6 mb-3">
+    <h5><i class="fas fa-database me-1"></i>Database Data (Comparison):</h5>
+    <div class="data-display-box">
+        {% if res_data.db_record_for_display and res_data.db_record_for_display|length > 0 %}
+            <dl>
+            {% for field, value in res_data.db_record_for_display.items() %}
+                <dt>{{ field }}:</dt>
+                <dd>{{ value | default('N/A', true) }}</dd>
+            {% endfor %}
+            </dl>
+        {# ... other conditions ... #}
+        {% endif %}
+    </div>
+                                            </div>
+                                </div>
+                            {% if 'accuracy' in res_data %}
+            <h5 class="mt-3"><i class="fas fa-check-double me-1"></i>PO Comparison & Accuracy:</h5>
+            <div class="data-display-box">
+                {% if res_data.comparison_error and not res_data.db_record_for_display %}
+                    <p class="error-message">{{ res_data.comparison_error }}</p>
+                {% else %}
+                    <p>Accuracy {% if res_data.compared_fields_list %}(based on: {{ res_data.compared_fields_list|join(', ') }}){% endif %}: 
+                        {% set acc = res_data.accuracy %}
+                        {% if acc >= 99.9 %}<span class="accuracy-good">Excellent ({{ "%.1f"|format(acc) }}%)</span>
+                        {# ... other accuracy levels ... #}
+                        {% endif %}
+                    </p>
+                    {% if res_data.mismatched_fields and res_data.mismatched_fields|length > 0 %}
+                        {# ... mismatch table ... #}
+                    {% elif res_data.accuracy >= 99.9 %}
+                        <p class="text-success"><i class="fas fa-thumbs-up me-1"></i>All compared fields matched!</p>
+                    {% else %}
+                        <p class="text-muted">No mismatches found in compared fields.</p>
+                    {% endif %}
+                {% endif %}
+            </div>
+            {% endif %}
+                            {% endif %} {# end error check #}
+                        </div> {# end result-container #}
+                        {% endfor %}
+                    {% elif request.method == 'POST' and active_tab_id == 'po' %}
+                         <div class="alert alert-info mt-3">Processing complete. If files were uploaded, results will appear above.</div>
+                    {% endif %}
+                    {% endif %} {# End PO Tab specific content #}
+
+                    {# --- ATS Verification Tab Content --- #}
+                    {% if tab_id == 'ats' %}
+                    <h3 class="mb-3 mt-3"><i class="fas fa-user-tie me-2"></i>Upload Resumes (ATS)</h3>
+                    <form method="POST" enctype="multipart/form-data" action="{{ url_for('app_dashboard') }}" class="mb-4">
+                        <input type="hidden" name="upload_type" value="ats"><input type="hidden" name="active_tab_id" value="ats">
+                        <div class="mb-3">
+                            <label for="atsFiles" class="form-label">Select Resume files (PDFs, DOCX, Images):</label>
+                            <input class="form-control" type="file" id="atsFiles" name="document" accept=".pdf,.docx,image/*" multiple required>
+                        </div>
+                        <button type="submit" class="btn btn-primary"><i class="fas fa-user-check me-1"></i>Process Resumes</button>
+                    </form>
+                     {% if results and active_tab_id == 'ats' %}
+                        {% for filename, res_data in results.items() %}
+                        <div class="result-container mb-4">
+                            <h4 class="result-title">
+                                <span>Results for: {{ filename }}</span>
+                                {% if not res_data.error %}
+                                <a href="{{ url_for('download_report', doc_type='ats', filename_key=filename) }}" class="btn btn-sm btn-outline-secondary" target="_blank"><i class="bi bi-download me-1"></i>Download Report</a>
+                                {% endif %}
+                            </h4>
+                            {% if res_data.error %}
+                                <p class="error-message"><i class="fas fa-exclamation-triangle me-1"></i>{{ res_data.error }}</p>
+                            {% else %}
+                                <div class="mb-3"><h5><i class="fas fa-align-left me-1"></i>Extracted Text:</h5><pre>{{ res_data.extracted_text | default('N/A', true) }}</pre></div>
+                                <div class="mb-3">
+                                    <h5><i class="fas fa-project-diagram me-1"></i>Extracted Data:</h5>
+                                    <div class="data-display-box">
+                                        {% if res_data.structured_data and res_data.structured_data|length > 0 %}
+                                            <dl>
+                                            {% for field_label in ATS_FIELDS_FOR_USER_EXTRACTION %}
+                                                {% if field_label in res_data.structured_data %}
+                                                <dt>{{ field_label }}:</dt>
+                                                <dd>{{ res_data.structured_data[field_label] | default('N/A', true) }}</dd>
+                                                {% endif %}
+                                            {% endfor %}
+                                            </dl>
+                                        {% else %}
+                                            <p class="text-muted">No structured data extracted.</p>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                             {% if 'accuracy' in res_data %} {# 'accuracy' for ATS means criteria met percentage #}
+                                    <h5 class="mt-3"><i class="fas fa-tasks me-1"></i>ATS Criteria Validation:</h5>
+                                    <div class="data-display-box">
+                                        {% if res_data.comparison_error %} {# General message like "No criteria defined" #}
+                                            <p class="text-muted">{{ res_data.comparison_error }}</p>
+                                        {% endif %}
+                                        <p>Validation Accuracy (Criteria Met): 
+                                            {% set acc = res_data.accuracy %}
+                                            {% if acc >= 99.9 %}<span class="accuracy-good">Excellent ({{ "%.1f"|format(acc) }}%)</span>
+                                            {% elif acc >= 80 %}<span class="accuracy-good">Good ({{ "%.1f"|format(acc) }}%)</span>
+                                            {% elif acc >= 60 %}<span class="accuracy-moderate">Moderate ({{ "%.1f"|format(acc) }}%)</span>
+                                            {% else %}<span class="accuracy-bad">Low ({{ "%.1f"|format(acc) }}%)</span>{% endif %}
+                                        </p>
+                                        {% if res_data.mismatched_fields and res_data.mismatched_fields|length > 0 %} {# These are failed criteria details #}
+                                            <h6 class="mt-2">Failed Criteria:</h6>
+                                            {# THIS IS THE CORRECTED TABLE STRUCTURE #}
+                                            <table class="mismatch-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th>Criterion (Field & Rule)</th>
+                                                        <th>Your Document's Value</th>
+                                                        <th>Issue / Details</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                {% for criterion_key, failure_details in res_data.mismatched_fields.items() %}
+                                                    <tr>
+                                                        <td>{{ criterion_key }}</td>
+                                                        <td>{{ failure_details.extracted_value | default('(not found/empty)', true) }}</td>
+                                                        <td>{{ failure_details.reason }}</td>
+                                                    </tr>
+                                                {% endfor %}
+                                                </tbody>
+                                            </table>
+                                        {% elif res_data.accuracy >= 99.9 and res_data.compared_fields_list and res_data.compared_fields_list|length > 0 %}
+                                            <p class="text-success"><i class="fas fa-thumbs-up me-1"></i>All active criteria passed!</p>
+                                        {% elif not res_data.compared_fields_list or res_data.compared_fields_list|length == 0 and not res_data.comparison_error %}
+                                            <p class="text-muted">No active criteria were evaluated.</p> 
+                                        {% elif not res_data.comparison_error %} {# Added to avoid double message if comparison_error already states no criteria #}
+                                            <p class="text-muted">No criteria failed.</p>
+                                        {% endif %}
+                                    </div>
+                                    {% endif %}{# end accuracy check for ATS #}
+                            {% endif %} {# end error check #}
+                        </div> {# end result-container #}
+                        {% endfor %}
+                    {% elif request.method == 'POST' and active_tab_id == 'ats' %}
+                         <div class="alert alert-info mt-3">Processing complete. If files were uploaded, results will appear above.</div>
+                    {% endif %}
+                    {% endif %} {# End ATS Tab specific content #}
+
+                </div> {# End tab-pane #}
+                {% endfor %} {# End loop through accessible_tabs_info for panes #}
+            </div> {# End Tab Content #}
+        {% else %}
+            <div class="alert alert-warning mt-4">You do not have access to any verification modules. Please contact an administrator.</div>
+        {% endif %}
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
