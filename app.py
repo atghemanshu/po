@@ -5,24 +5,44 @@ import string
 import random
 from functools import wraps
 import json
-import uuid # Added for ATS criteria IDs
+import uuid # Still needed for ATS criteria IDs if you generate them in Python
+
+from dotenv import load_dotenv # For loading .env file
 
 from flask import (
     Flask, render_template, request, redirect, url_for,
     session, flash, jsonify, Response
 )
-from werkzeug.security import generate_password_hash, check_password_hash
+# REMOVE: from flask_sqlalchemy import SQLAlchemy
+# REMOVE: from sqlalchemy_serializer import SerializerMixin
+from supabase import create_client, Client # ADDED for Supabase
+
+from werkzeug.security import generate_password_hash, check_password_hash # Still needed
 from pdfminer.high_level import extract_text as pdf_extract_text
 from docx import Document as DocxDocument
 import requests
+# REMOVE: import datetime (unless used elsewhere, Supabase handles timestamps)
+
+load_dotenv() # Call this very early
 
 # --- App Setup ---
 TEMP_FOLDER = os.path.join(os.path.dirname(__file__), 'temp')
 os.makedirs(TEMP_FOLDER, exist_ok=True)
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(16))
-app.config['SESSION_TYPE'] = 'filesystem' # Recommended for storing larger session data if needed
+app.secret_key = os.environ.get('SECRET_KEY')
+if not app.secret_key:
+    raise RuntimeError("SECRET_KEY environment variable not set!")
+app.config['SESSION_TYPE'] = 'filesystem'
+
+# --- Supabase Client Initialization ---
+supabase_url: str = os.environ.get("SUPABASE_URL")
+supabase_key: str = os.environ.get("SUPABASE_KEY") # This should be the service_role key
+
+if not supabase_url or not supabase_key:
+    raise RuntimeError("SUPABASE_URL or SUPABASE_KEY environment variables not set!")
+supabase: Client = create_client(supabase_url, supabase_key)
+# --- End Supabase Client Initialization ---
 
 # --- Configuration ---
 OCR_SPACE_API_URL = "https://api.ocr.space/parse/image"
@@ -393,8 +413,40 @@ def extract_structured_data(text, fields_to_extract_labels, upload_type=None):
     return data
 
 # --- PO Database Comparison Logic ---
-def get_po_db_record(po_number_value):
-    return dummy_database["po"].get(po_number_value)
+        
+         # app.py
+
+def get_po_db_record(po_number_value_param):
+    if not po_number_value_param:
+        return None
+    print(f"DEBUG: get_po_db_record querying for: '{po_number_value_param}'") # DEBUG
+    try:
+        # Fetch from Supabase, columns are po_number, vendor, phone, total, order_date, vendor_name
+        response = supabase.table('admin_po_database_entries').select(
+            "po_number, vendor, phone, total, order_date, vendor_name" # Select specific dedicated columns
+        ).eq('po_number', po_number_value_param).single().execute()
+        
+        if response.data:
+            db_entry_row = response.data # e.g., {'po_number': '81100', 'vendor': 'S101334', ...}
+            
+            # Map DB column names back to the "Display Label" keys
+            frontend_formatted_record = {
+                "PO Number": db_entry_row.get("po_number"),
+                "Vendor": db_entry_row.get("vendor"),
+                "Phone": db_entry_row.get("phone"),
+                "Total": db_entry_row.get("total"),
+                # Convert date object to string if it's not already. Supabase might return string.
+                "Order Date": str(db_entry_row.get("order_date")) if db_entry_row.get("order_date") else None,
+                "Vendor Name": db_entry_row.get("vendor_name")
+            }
+            return frontend_formatted_record
+        return None # PO not found
+    except Exception as e:
+        if "No rows found" in str(e) or (hasattr(e, 'code') and e.code == 'PGRST116'): # PostgREST code for single() not finding row
+            app.logger.info(f"PO record {po_number_value_param} not found in Supabase.")
+        else:
+            app.logger.error(f"Error fetching PO {po_number_value_param} from Supabase: {e}")
+        return None
 
 def compare_po_data(extracted_data, db_record, comparison_field_labels):
     if not db_record: return 0, {}, "PO Record not found in database."
@@ -417,33 +469,79 @@ def compare_po_data(extracted_data, db_record, comparison_field_labels):
 
 
 # --- ATS Data Validation Against Admin Criteria ---
-def validate_ats_data(extracted_data, criteria_db):
-    if not criteria_db: return 100.0, {}, "No ATS criteria defined by admin." # No criteria means 100% pass
-    
+         
+         # app.py
+
+def validate_ats_data(extracted_data): # No longer takes criteria_db as argument
+    criteria_from_db_grouped = {}
+    try:
+        response = supabase.table('admin_ats_criteria').select("*").eq('is_active', True).execute()
+        if response.data:
+            for criterion_db_obj in response.data:
+                field_label = criterion_db_obj.get('field_label')
+                if field_label not in criteria_from_db_grouped:
+                    criteria_from_db_grouped[field_label] = []
+                
+                # The object from DB directly contains field_label, condition_type, is_active, condition_values
+                # This is what the rest of the original validate_ats_data logic can work with.
+                # We need to make sure 'keywords', 'value1', etc. are accessible if the original logic expected them flat.
+                # The previous version of validate_ats_data already expected to get these from criterion.get("value1") etc.
+                # The criterion from DB now has these nested in 'condition_values'.
+                
+                # Let's make a dictionary for this criterion that mirrors the old structure
+                # where condition-specific values were at the top level of the criterion dict.
+                # OR, modify the validation logic below to look inside `criterion['condition_values']`.
+                # For now, let's try to adapt the criterion object.
+                
+                current_criterion_for_validation = {
+                    "id": criterion_db_obj.get("id"),
+                    "field_label": field_label,
+                    "condition_type": criterion_db_obj.get("condition_type"),
+                    "is_active": criterion_db_obj.get("is_active") # Should always be true here
+                }
+                if criterion_db_obj.get("condition_values"): # If it's not None
+                    current_criterion_for_validation.update(criterion_db_obj.get("condition_values"))
+                
+                criteria_from_db_grouped[field_label].append(current_criterion_for_validation)
+                
+    except Exception as e:
+        app.logger.error(f"Error fetching ATS criteria for validation: {e}")
+        # If criteria can't be fetched, perhaps treat as if no criteria are active or raise error
+        return 100.0, {}, f"Error fetching validation criteria: {str(e)}"
+
+    if not criteria_from_db_grouped:
+        return 100.0, {}, "No active ATS criteria defined by admin."
+
     total_active_criteria = 0
     passed_criteria_count = 0
-    failed_criteria_details = {} # {"Field Label": "Reason for failure"}
+    failed_criteria_details = {}
 
-    for field_label, criteria_list in criteria_db.items():
+    for field_label, criteria_list_for_field in criteria_from_db_grouped.items():
         extracted_value_str = str(extracted_data.get(field_label, "")).strip()
         extracted_value_lower = extracted_value_str.lower()
 
-        for criterion in criteria_list:
-            if not criterion.get("is_active", False): continue
+        for criterion in criteria_list_for_field: # criterion is now the adapted dict
+            # No need to check is_active again as we filtered in query, but doesn't hurt
+            if not criterion.get("is_active", False): continue 
+            
             total_active_criteria += 1
             passed_this_criterion = False
             condition_type = criterion.get("condition_type")
-            
+            reason = "Condition not met." # Default reason
+
             try:
+                # The rest of your validation logic using criterion.get("value1"), criterion.get("keywords") etc.
+                # from the previous version of validate_ats_data should now work because we've
+                # merged `condition_values` into the `current_criterion_for_validation` dict.
                 if condition_type == "range_numeric":
                     min_val = float(criterion.get("value1", 0))
                     max_val = float(criterion.get("value2", float('inf')))
-                    num_ext_val = float(extracted_value_str) if extracted_value_str else None
+                    num_ext_val = float(extracted_value_str) if extracted_value_str and extracted_value_str.replace('.', '', 1).isdigit() else None
                     if num_ext_val is not None and min_val <= num_ext_val <= max_val: passed_this_criterion = True
                     else: reason = f"Value '{extracted_value_str}' not in range [{min_val}-{max_val}]"
                 
                 elif condition_type == "contains_any":
-                    keywords = [kw.strip().lower() for kw in criterion.get("keywords", []) if kw.strip()]
+                    keywords = [str(kw).strip().lower() for kw in criterion.get("keywords", []) if str(kw).strip()]
                     if any(kw in extracted_value_lower for kw in keywords): passed_this_criterion = True
                     else: reason = f"Did not contain any of: {', '.join(criterion.get('keywords',[]))}"
                 
@@ -454,46 +552,46 @@ def validate_ats_data(extracted_data, criteria_db):
                 
                 elif condition_type == "min_numeric":
                     min_val = float(criterion.get("value1", 0))
-                    num_ext_val = float(extracted_value_str) if extracted_value_str else None
+                    num_ext_val = float(extracted_value_str) if extracted_value_str and extracted_value_str.replace('.', '', 1).isdigit() else None
                     if num_ext_val is not None and num_ext_val >= min_val: passed_this_criterion = True
                     else: reason = f"Value '{extracted_value_str}' below minimum of {min_val}"
 
                 elif condition_type == "max_numeric":
                     max_val = float(criterion.get("value1", float('inf')))
-                    num_ext_val = float(extracted_value_str) if extracted_value_str else None
+                    num_ext_val = float(extracted_value_str) if extracted_value_str and extracted_value_str.replace('.', '', 1).isdigit() else None
                     if num_ext_val is not None and num_ext_val <= max_val: passed_this_criterion = True
                     else: reason = f"Value '{extracted_value_str}' above maximum of {max_val}"
 
                 elif condition_type == "is_one_of":
-                    options = [opt.strip().lower() for opt in criterion.get("options", []) if opt.strip()]
+                    options = [str(opt).strip().lower() for opt in criterion.get("options", []) if str(opt).strip()]
                     if extracted_value_lower in options: passed_this_criterion = True
                     else: reason = f"Value '{extracted_value_str}' not one of: {', '.join(criterion.get('options',[]))}"
                 
-                else: # Unknown condition type
-                    reason = f"Unknown condition type '{condition_type}'"
-                    # total_active_criteria -= 1 # Or handle as a fail
-
-            except ValueError: # If float conversion fails for numeric types
-                reason = f"Extracted value '{extracted_value_str}' is not a valid number for numeric comparison."
-            except Exception as e:
-                reason = f"Error during validation: {str(e)}"
+                else: 
+                    reason = f"Unknown or unhandled condition type '{condition_type}'"
+            
+            except ValueError: 
+                reason = f"Extracted value '{extracted_value_str}' for field '{field_label}' is not a valid number for numeric comparison with rule '{condition_type}'."
+            except Exception as e_val:
+                app.logger.error(f"Error during specific ATS criterion validation: {e_val} for criterion {criterion}")
+                reason = f"Error during validation rule: {e_val}"
 
             if passed_this_criterion:
                 passed_criteria_count += 1
             else:
-                # MODIFICATION HERE: Include extracted_value in the details
                 failed_criteria_details[f"{field_label} (Rule: {condition_type})"] = {
                     "reason": reason,
-                    "extracted_value": extracted_value_str # The value that was checked
+                    "extracted_value": extracted_value_str
                 }
+    
+    if total_active_criteria == 0 and not criteria_from_db_grouped : # No active criteria were even loaded
+         return 100.0, {}, "No active ATS criteria defined by admin."
+    elif total_active_criteria == 0 and criteria_from_db_grouped: # Criteria objects exist but none were active (should not happen if query filters by is_active=True)
+        return 100.0, {}, "No criteria were active to validate against (though some may be defined)."
 
-    if total_active_criteria == 0:
-        # Return empty dict for failed_details if no active criteria
-        return 100.0, {}, "No active ATS criteria to validate against." 
-        
-    accuracy = (passed_criteria_count / total_active_criteria) * 100
-    return accuracy, failed_criteria_details, None
 
+    accuracy = (passed_criteria_count / total_active_criteria) * 100 if total_active_criteria > 0 else 100.0
+    return accuracy, failed_criteria_details, None # None for error message if processing occurred
 
 # --- Routes ---
 @app.route('/', methods=['GET'])
@@ -504,68 +602,136 @@ def landing_page():
         if session.get('accessible_tabs_info'): return redirect(url_for('app_dashboard'))
     return render_template('Template1.html') # The new Protomatic landing page
 
-def _load_user_session_data(user_email, user_data):
+# app.py
+
+def _load_user_session_data(user_email_from_db, user_data_from_db):
+    """
+    Helper to load user data into session after successful login for non-admin users.
+    user_data_from_db is a dictionary like:
+    {'email': 'user@example.com', 'username': 'testuser', 'role': 'po_verifier', ... (no hashed_password)}
+    """
     session['logged_in'] = True
-    session['user_email'] = user_email
-    session['username'] = user_data.get("username", user_email)
-    session['role'] = user_data.get('role', 'user') # Should always have a role from USERS_DB
+    session['user_email'] = user_email_from_db # or user_data_from_db.get('email')
+    session['username'] = user_data_from_db.get("username", user_email_from_db) # Use username from DB
+    session['role'] = user_data_from_db.get('role') # Role from DB
+
+    if not session['role'] or session['role'] == 'admin':
+        # This function should not be called for admins or users without a valid role
+        app.logger.warning(f"Attempted to load session for invalid role or admin: {session['role']}")
+        session.clear() # Clear potentially problematic session
+        return
 
     accessible_tabs_info = {}
     user_role = session['role']
 
+    # Logic based on roles to populate accessible_tabs_info
     if user_role == "po_verifier" or user_role == "sub_admin":
-        tab_config = AVAILABLE_TABS["po"]
-        accessible_tabs_info["po"] = {
-            "id": "po", "name": tab_config["name"], "icon": tab_config["icon"],
-            # "allowed_field_labels": PO_FIELDS_FOR_USER_EXTRACTION # For display if needed by template
-        }
+        if "po" in AVAILABLE_TABS: # Check if tab is defined
+            tab_config = AVAILABLE_TABS["po"]
+            accessible_tabs_info["po"] = {
+                "id": "po", 
+                "name": tab_config["name"], 
+                "icon": tab_config["icon"]
+            }
     if user_role == "ats_verifier" or user_role == "sub_admin":
-        tab_config = AVAILABLE_TABS["ats"]
-        accessible_tabs_info["ats"] = {
-            "id": "ats", "name": tab_config["name"], "icon": tab_config["icon"],
-            # "allowed_field_labels": ATS_FIELDS_FOR_USER_EXTRACTION # For display
-        }
+        if "ats" in AVAILABLE_TABS: # Check if tab is defined
+            tab_config = AVAILABLE_TABS["ats"]
+            accessible_tabs_info["ats"] = {
+                "id": "ats", 
+                "name": tab_config["name"], 
+                "icon": tab_config["icon"]
+            }
+    
+    if not accessible_tabs_info:
+        app.logger.info(f"User {user_email_from_db} with role {user_role} has no accessible tabs configured.")
+        # This case is also handled in login_page after calling this function.
+        
     session['accessible_tabs_info'] = accessible_tabs_info
-
+    
 @app.route('/login', methods=['GET', 'POST'])
 def login_page():
-    if 'logged_in' in session and session['logged_in']:
-        if session.get('role') == 'admin': return redirect(url_for('admin_dashboard'))
-        if session.get('accessible_tabs_info'): return redirect(url_for('app_dashboard'))
+    if 'logged_in' in session and session.get('logged_in'):
+        if session.get('role') == 'admin':
+            return redirect(url_for('admin_dashboard'))
+        if session.get('accessible_tabs_info'): # Check if user already has session with tabs
+            return redirect(url_for('app_dashboard'))
 
     if request.method == 'POST':
         email = request.form.get('email')
         password = request.form.get('password')
-        user_data = USERS_DB.get(email)
 
-        if user_data and user_data['role'] != 'admin' and check_password_hash(user_data['hashed_password'], password):
-            _load_user_session_data(email, user_data) # Sets up accessible_tabs_info
-            if not session.get('accessible_tabs_info'):
-                flash('Login successful, but no modules assigned for your role.', 'warning')
-                session.clear(); return redirect(url_for('login_page'))
-            flash(f'Login successful! Welcome {session["username"]}.', 'success')
-            return redirect(url_for('app_dashboard'))
-        else:
-            flash('Invalid credentials or not a user account.', 'danger')
+        try:
+            # Query Supabase 'users' table
+            response = supabase.table('users').select("email, username, hashed_password, role").eq('email', email).execute()
+            
+            if response.data:
+                user_data_from_db = response.data[0] # .execute() returns a list, get the first item
+                
+                if user_data_from_db.get('role') != 'admin' and \
+                   check_password_hash(user_data_from_db.get('hashed_password'), password):
+                    
+                    # Pass the fetched user data to _load_user_session_data
+                    # Note: _load_user_session_data will need to handle this dictionary format
+                    _load_user_session_data(user_data_from_db.get('email'), user_data_from_db) 
+                                        
+                    if not session.get('accessible_tabs_info'): # Check after _load_user_session_data
+                        flash('Login successful, but no modules assigned for your role.', 'warning')
+                        # Potentially clear session if no access, or redirect differently
+                        # For now, redirecting to login might be confusing, maybe logout or a dedicated no-access page
+                        session.clear() 
+                        return redirect(url_for('login_page'))
+                    
+                    flash(f'Login successful! Welcome {session.get("username", "User")}.', 'success')
+                    return redirect(url_for('app_dashboard'))
+                else:
+                    flash('Invalid credentials or not an authorized user account.', 'danger')
+            else: # No user found with that email
+                flash('Invalid credentials.', 'danger')
+        except Exception as e:
+            app.logger.error(f"Error during user login for {email}: {e}")
+            flash('An error occurred during login. Please try again.', 'danger')
+            
     return render_template('login.html')
+
+# app.py
 
 @app.route('/admin', methods=['GET', 'POST']) # Admin login
 def admin_login_page():
     if 'logged_in' in session and session.get('role') == 'admin':
         return redirect(url_for('admin_dashboard'))
+
     if request.method == 'POST':
         email = request.form.get('email')
         password = request.form.get('password')
-        user_data = USERS_DB.get(email)
-        if user_data and user_data['role'] == 'admin' and check_password_hash(user_data['hashed_password'], password):
-            session['logged_in'] = True
-            session['user_email'] = email
-            session['username'] = user_data.get("username", "Admin")
-            session['role'] = "admin"
-            flash('Admin login successful!', 'success')
-            return redirect(url_for('admin_dashboard'))
-        else:
-            flash('Invalid admin credentials.', 'danger')
+
+        try:
+            # Query Supabase 'users' table
+            # This is CORRECT for Supabase
+            response = supabase.table('users').select("email, username, hashed_password, role").eq('email', email).eq('role', 'admin').execute()
+            
+            if response.data:
+                admin_data_from_db = response.data[0]
+                
+                if check_password_hash(admin_data_from_db.get('hashed_password'), password):
+                    session['logged_in'] = True
+                    session['user_email'] = admin_data_from_db.get('email')
+                    session['username'] = admin_data_from_db.get('username', 'Admin') 
+                    session['role'] = 'admin'
+                    session.pop('accessible_tabs_info', None) 
+                    flash('Admin login successful!', 'success')
+                    return redirect(url_for('admin_dashboard'))
+                else:
+                    flash('Invalid admin credentials (password mismatch).', 'danger') # More specific
+            else: # No admin user found with that email and role 'admin'
+                flash('Invalid admin credentials (user not found or not admin).', 'danger') # More specific
+        except Exception as e:
+            app.logger.error(f"Error during admin login for {email}: {e}") # Log the actual error
+            # For connection errors like getaddrinfo, this exception block will be hit.
+            if "[Errno 11001]" in str(e): # Check if it's the getaddrinfo error
+                 flash('Network error: Could not connect to the authentication service. Please check your internet connection and Supabase URL.', 'danger')
+            else:
+                 flash('An error occurred during admin login. Please try again later.', 'danger')
+            
     return render_template('admin_login.html')
 
 @app.route('/logout')
@@ -632,36 +798,158 @@ def app_dashboard():
                                 file_results_for_template["structured_data"] = structured_data
                                 
                                 po_number_val = structured_data.get("PO Number")
-                                db_record = None; comp_error = "PO Number not extracted."
-                                if po_number_val:
-                                    db_record = get_po_db_record(po_number_val)
-                                    if db_record:
-                                        accuracy, mismatched, comp_error = compare_po_data(structured_data, db_record, PO_KEY_COMPARISON_FIELDS)
-                                        file_results_for_template["accuracy"] = accuracy
-                                        file_results_for_template["mismatched_fields"] = mismatched
-                                        file_results_for_template["db_record_for_display"] = {k: db_record.get(k) for k in PO_KEY_COMPARISON_FIELDS if k in db_record}
-                                        file_results_for_template["compared_fields_list"] = PO_KEY_COMPARISON_FIELDS
-                                    else: comp_error = f"PO Number '{po_number_val}' not found in database."
-                                file_results_for_template["comparison_error"] = comp_error if not db_record or comp_error else None
 
+                                db_record_data_for_display = None # Initialize
+                                accuracy_val = 0 # Initialize
+                                mismatched_data = {} # Initialize
+                                comparison_fields_list_for_template = [] # Initialize
+                                comp_error_msg = "PO Number not extracted from document." # Default error
+
+                                if po_number_val:
+                                    po_number_val = po_number_val.strip() 
+                                    print(f"DEBUG: Extracted PO Number for DB lookup: '{po_number_val}' (Type: {type(po_number_val)})") # DEBUG
+                                    # get_po_db_record should now fetch from Supabase and return a dict with "Label" keys
+                                    po_data_from_db = get_po_db_record(po_number_val) 
+                                    
+                                    if po_data_from_db:
+                                        # Perform comparison using ONLY the PO_KEY_COMPARISON_FIELDS
+                                        # compare_po_data expects extracted_data with "Label" keys and db_record with "Label" keys
+                                        accuracy_val, mismatched_data, comp_error_from_compare = compare_po_data(
+                                            structured_data,       # Extracted data with "Label" keys
+                                            po_data_from_db,       # DB data already formatted with "Label" keys by get_po_db_record
+                                            PO_KEY_COMPARISON_FIELDS # List of "Label" keys to compare
+                                        )
+                                        
+                                        # For display, show only the key comparison fields from the DB record data
+                                        db_record_data_for_display = {
+                                            k: po_data_from_db.get(k) for k in PO_KEY_COMPARISON_FIELDS if k in po_data_from_db
+                                        }
+                                        comparison_fields_list_for_template = PO_KEY_COMPARISON_FIELDS
+                                        comp_error_msg = comp_error_from_compare # Overwrite default if comparison happened
+                                    else:
+                                        comp_error_msg = f"PO Number '{po_number_val}' not found in database."
+                                
+                                # Populate results for the template
+                                file_results_for_template["accuracy"] = accuracy_val
+                                file_results_for_template["mismatched_fields"] = mismatched_data
+                                file_results_for_template["db_record_for_display"] = db_record_data_for_display
+                                file_results_for_template["compared_fields_list"] = comparison_fields_list_for_template
+                                
+                                # Only set comparison_error if there was truly an error preventing comparison
+                                # If po_number_val was extracted but not found in DB, that's a valid state for comp_error_msg
+                                # If po_number_val was not extracted, that's also a valid state for comp_error_msg
+                                if comp_error_msg and (not po_number_val or (po_number_val and not po_data_from_db and "not found in database" in comp_error_msg)):
+                                    file_results_for_template["comparison_error"] = comp_error_msg
+                                elif comp_error_msg and comp_error_msg != "PO Number not extracted from document.": # If error came from compare_po_data
+                                    file_results_for_template["comparison_error"] = comp_error_msg
+                                else: # No significant error, or PO Number just wasn't extracted (already handled by comp_error_msg default)
+                                    file_results_for_template["comparison_error"] = None if accuracy_val > 0 or not po_number_val else comp_error_msg
 
                             elif upload_type == 'ats':
                                 structured_data = extract_structured_data(extracted_text, ATS_FIELDS_FOR_USER_EXTRACTION, upload_type='ats')
                                 file_results_for_template["structured_data"] = structured_data
-                                RESUMES_DATA_DB[filename] = structured_data # Store extracted data
+                                
+                                # --- Save extracted resume data to Supabase ---
+                                try:
+                                    resume_entry_payload = {
+                                       "original_filename": filename,
+                                        "sr_no": structured_data.get("Sr no."),
+                                        "name": structured_data.get("Name"),
+                                        "gender": structured_data.get("Gender"),
+                                        "phone": structured_data.get("Phone"),
+                                        "city": structured_data.get("City"),
+                                        "age": structured_data.get("Age"),
+                                        "country": structured_data.get("Country"),
+                                        "address": structured_data.get("Address"),
+                                        "email": structured_data.get("Email"),
+                                        "skills": structured_data.get("Skills"),
+                                        "salary": structured_data.get("Salary"),
+                                        "percentage": structured_data.get("Percentage")
+                                        # user_id: session.get('user_db_id') # If you implement user linking
+                                    }
+                                    # Ensure keys in structured_data are valid for the dedicated columns if you chose that schema
+                                    # If using dedicated columns for extracted_resume_data:
+                                    # resume_entry_payload = {
+                                    #     "original_filename": filename,
+                                    #     "sr_no": structured_data.get("Sr no."),
+                                    #     "name": structured_data.get("Name"),
+                                    #     # ... map all other ATS_FIELDS_FOR_USER_EXTRACTION to their DB column names
+                                    # }
 
-                                accuracy, failed_details, validation_error_msg = validate_ats_data(structured_data, ATS_VALIDATION_CRITERIA_DB)
+                                    insert_response = supabase.table('extracted_resume_data').insert(resume_entry_payload).execute()
+                                    if insert_response.data:
+                                        app.logger.info(f"Successfully saved extracted data for resume: {filename}")
+                                    # else: # Handle error if insert_response.error exists
+                                        # app.logger.error(f"Error saving resume data for {filename} to Supabase: {getattr(insert_response, 'error', 'Unknown error')}")
+                                        # file_results_for_template["error"] = "Could not save extracted resume data to database." 
+                                        # results[filename] = file_results_for_template
+                                        # continue # Skip to next file if saving failed
+                                except Exception as db_save_error:
+                                    app.logger.error(f"Exception saving resume data for {filename} to Supabase: {db_save_error}")
+                                    file_results_for_template["error"] = "Database error while saving resume data."
+                                    results[filename] = file_results_for_template
+                                    continue # Skip to next file
+
+                                # --- Corrected call to validate_ats_data ---
+                                # It now fetches criteria from Supabase itself
+                                accuracy, failed_details, validation_error_msg = validate_ats_data(structured_data) 
+                                
                                 file_results_for_template["accuracy"] = accuracy
                                 file_results_for_template["mismatched_fields"] = failed_details # These are failed criteria
-                                file_results_for_template["comparison_error"] = validation_error_msg # Overall message
-                                file_results_for_template["compared_fields_list"] = [ # List active criteria fields
-                                    f_label for f_label, crits in ATS_VALIDATION_CRITERIA_DB.items() if any(c.get("is_active") for c in crits)
-                                ]
+                                file_results_for_template["comparison_error"] = validation_error_msg # Overall message like "No active criteria"
+                                # --- Prepare data for the accuracy chart ---
+                                acc_calc_val = accuracy if accuracy is not None else 0.0
+                                file_results_for_template["acc_calc_val"] = acc_calc_val # Raw accuracy for JS
+                                file_results_for_template["acc_display_val"] = f"{acc_calc_val:.1f}" # Formatted for display
+
+                                chart_radius = 40 # SVG units
+                                chart_stroke_width = 10 # SVG units
+                                chart_circumference = 2 * 3.1415926535 * chart_radius
+                                chart_offset = chart_circumference * (1 - (acc_calc_val / 100))
+
+                                file_results_for_template["chart_radius"] = chart_radius
+                                file_results_for_template["chart_stroke_width"] = chart_stroke_width
+                                file_results_for_template["chart_circumference"] = chart_circumference
+                                file_results_for_template["chart_offset"] = chart_offset
+
+                                chart_color = "#dc3545" # Default bad (red)
+                                chart_text_class = "accuracy-bad"
+                                chart_description = "Low"
+                                if acc_calc_val >= 99.9:
+                                    chart_color = "#198754" # Good (green)
+                                    chart_text_class = "accuracy-good"
+                                    chart_description = "Excellent"
+                                elif acc_calc_val >= 80:
+                                    chart_color = "#198754" # Good (green)
+                                    chart_text_class = "accuracy-good"
+                                    chart_description = "Good"
+                                elif acc_calc_val >= 60:
+                                    chart_color = "#ffc107" # Moderate (yellow)
+                                    chart_text_class = "accuracy-moderate"
+                                    chart_description = "Moderate"
+
+                                file_results_for_template["chart_color"] = chart_color
+                                file_results_for_template["chart_text_class"] = chart_text_class
+                                file_results_for_template["chart_description"] = chart_description
+                                # --- End chart data preparation ---
+                                
+                                 
+
+                                # Get list of fields for which active criteria exist, for template display
+                                active_criteria_fields = []
+                                try:
+                                    criteria_response = supabase.table('admin_ats_criteria').select("field_label").eq('is_active', True).execute()
+                                    if criteria_response.data:
+                                        active_criteria_fields = list(set([c['field_label'] for c in criteria_response.data])) # Unique field labels
+                                except Exception as crit_e:
+                                    app.logger.error(f"Could not fetch active criteria field list for display: {crit_e}")
+
+                                file_results_for_template["compared_fields_list"] = active_criteria_fields
                             
-                            processed_count += 1
                         else:
                             file_results_for_template["error"] = extracted_text or "Text extraction failed."
-                        
+                        print(f"DEBUG: file_results_for_template for {filename}: {json.dumps(file_results_for_template, indent=2)}")
+
                         results[filename] = file_results_for_template
                         session['processed_results_for_report'][filename] = file_results_for_template # Save for report
                         session.modified = True 
@@ -687,7 +975,7 @@ def app_dashboard():
                            PO_FIELDS_FOR_USER_EXTRACTION=PO_FIELDS_FOR_USER_EXTRACTION, # Pass to template
                            ATS_FIELDS_FOR_USER_EXTRACTION=ATS_FIELDS_FOR_USER_EXTRACTION # Pass to template
                            )
-
+          
 # --- Placeholder for PDF Report Download ---
 @app.route('/download_report/<doc_type>/<filename_key>')
 @login_required
@@ -743,9 +1031,27 @@ def admin_dashboard():
 @app.route('/api/admin/manage_users', methods=['GET'])
 @admin_required
 def api_manage_get_users():
-    user_list = [{"email": email, "username": data.get("username"), "role": data.get("role")}
-                 for email, data in USERS_DB.items() if data.get("role") != 'admin']
-    return jsonify(user_list)
+    try:
+        # Select all columns needed for display, excluding admins
+        # The 'users' table in Supabase has 'email', 'username', 'role'
+        response = supabase.table('users').select("email, username, role").neq('role', 'admin').execute()
+        
+        if response.data:
+            user_list = response.data # response.data is already a list of dictionaries
+            return jsonify(user_list)
+        else:
+            # Handle case where there are no non-admin users or an error occurred
+            # if response.error: # Supabase client might populate an error attribute
+            #     app.logger.error(f"Supabase error fetching users: {response.error.message}")
+            #     return jsonify({"error": f"Database error: {response.error.message}"}), 500
+            return jsonify([]) # Return empty list if no non-admin users
+            
+    except Exception as e:
+        app.logger.error(f"Exception in api_manage_get_users: {e}")
+        return jsonify({"error": "An unexpected error occurred while fetching users."}), 500
+
+     # app.py
+# Ensure generate_password_hash is imported: from werkzeug.security import generate_password_hash
 
 @app.route('/api/admin/manage_users', methods=['POST'])
 @admin_required
@@ -756,56 +1062,244 @@ def api_manage_add_user():
     password = data.get('password')
     role = data.get('role') 
 
-    if not all([email, username, password, role]): return jsonify({"error": "All fields required"}), 400
-    if not re.match(r"[^@]+@[^@]+\.[^@]+", email): return jsonify({"error": "Invalid email"}), 400
-    if email in USERS_DB: return jsonify({"error": "Email already exists"}), 409
+    # --- Basic Validation ---
+    if not all([email, username, password, role]):
+        return jsonify({"error": "All fields (email, username, password, role) are required"}), 400
+    if not re.match(r"[^@]+@[^@]+\.[^@]+", email): # Basic email format check
+        return jsonify({"error": "Invalid email format"}), 400
     valid_roles = ["sub_admin", "po_verifier", "ats_verifier"]
-    if role not in valid_roles: return jsonify({"error": f"Invalid role. Must be one of: {', '.join(valid_roles)}"}), 400
+    if role not in valid_roles:
+        return jsonify({"error": f"Invalid role specified. Must be one of: {', '.join(valid_roles)}"}), 400
+    if role == 'admin': # Prevent creating another admin this way
+        return jsonify({"error": "Cannot create admin users through this API."}), 400
+    # --- End Validation ---
 
-    USERS_DB[email] = {"username": username, "hashed_password": generate_password_hash(password), "role": role}
-    print(f"Admin added user {username} ({email}) with role {role}")
-    return jsonify({"message": "User created successfully", "user": {"email": email, "username": username, "role": role}}), 201
+    try:
+        # Check if user already exists by email
+        existing_user_response = supabase.table('users').select("id").eq('email', email).execute()
+        if existing_user_response.data:
+            return jsonify({"error": "User with this email already exists"}), 409
 
-@app.route('/api/admin/manage_users/<string:user_email>', methods=['PUT'])
+        hashed_pwd = generate_password_hash(password)
+        user_to_insert = {
+            "email": email, 
+            "username": username, 
+            "hashed_password": hashed_pwd, 
+            "role": role
+        }
+        insert_response = supabase.table('users').insert(user_to_insert).execute()
+
+        if insert_response.data:
+            created_user_data = insert_response.data[0]
+            # Return only non-sensitive info
+            user_for_response = {
+                "email": created_user_data.get('email'),
+                "username": created_user_data.get('username'),
+                "role": created_user_data.get('role')
+            }
+            return jsonify({"message": "User created successfully", "user": user_for_response}), 201
+        else:
+            # This 'else' might indicate an issue not caught by an exception, e.g., RLS preventing insert
+            # but with service_role key, RLS should be bypassed.
+            # More likely, if there's an error, execute() would raise it or response.error would be set.
+            # error_msg = "Failed to create user in database."
+            # if hasattr(insert_response, 'error') and insert_response.error:
+            #     error_msg += f" DB Error: {insert_response.error.message}"
+            # app.logger.error(f"User creation failed for {email} with response: {insert_response}")
+            return jsonify({"error": "Failed to create user due to a database issue."}), 500
+            
+    except Exception as e:
+        app.logger.error(f"Exception in api_manage_add_user for {email}: {e}")
+        return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
+
+@app.route('/api/admin/manage_users/<string:user_email_param>', methods=['PUT'])
 @admin_required
-def api_manage_update_user(user_email):
-    if user_email not in USERS_DB or USERS_DB[user_email].get("role") == 'admin':
-        return jsonify({"error": "User not found or cannot modify admin"}), 404
-    data = request.json; updated = False
-    if 'username' in data and data['username'].strip():
-        USERS_DB[user_email]['username'] = data['username'].strip(); updated = True
-    if 'role' in data and data['role'] in ["sub_admin", "po_verifier", "ats_verifier"]:
-        USERS_DB[user_email]['role'] = data['role']; updated = True
-    elif 'role' in data: return jsonify({"error": "Invalid role for update"}), 400
-    if 'password' in data and data['password']: # Admin can reset/change password
-        USERS_DB[user_email]['hashed_password'] = generate_password_hash(data['password'])
-        flash(f"Password for {user_email} has been changed by admin.", "info") # Flash for admin maybe?
-        updated = True
-        print(f"Admin changed password for {user_email}")
+def api_manage_update_user(user_email_param):
+    # user_email_param is the original email from the URL, used to identify the user.
+    data = request.json # Get the update data from the request body
 
-    if not updated: return jsonify({"message": "No changes provided."}), 200
-    return jsonify({"message": "User updated.", "user": {"email": user_email, **USERS_DB[user_email]}}), 200
+    try:
+        # Step 1: Fetch the user by their email to get their ID and current role.
+        # It's safer to perform updates using the immutable primary key (id) if possible.
+        user_check_response = supabase.table('users').select("id, role, email, username").eq('email', user_email_param).single().execute()
+        # .single() will return one record or raise an error if not exactly one is found.
+        # If no user is found, response.data will be None or an error might be in response.error
+        # However, the supabase-py client often raises an exception directly if .single() finds no match.
 
-@app.route('/api/admin/manage_users/<string:user_email>', methods=['DELETE'])
+        if not user_check_response.data: # Should be caught by exception from .single() if no user
+            return jsonify({"error": "User not found"}), 404
+        
+        user_to_update = user_check_response.data 
+        user_to_update_id = user_to_update['id']
+        
+        if user_to_update['role'] == 'admin':
+            return jsonify({"error": "Cannot modify the main admin account through this API"}), 403
+
+        updates_payload = {} # Dictionary to hold only the fields that are actually being changed
+
+        # Check for username update
+        if 'username' in data and data['username'] is not None:
+            new_username = data['username'].strip()
+            if new_username and new_username != user_to_update.get('username'):
+                updates_payload['username'] = new_username
+
+        # Check for role update
+        if 'role' in data and data['role'] is not None:
+            new_role = data['role'].strip()
+            valid_roles = ["sub_admin", "po_verifier", "ats_verifier"]
+            if new_role in valid_roles:
+                if new_role != user_to_update.get('role'):
+                    updates_payload['role'] = new_role
+            else:
+                return jsonify({"error": f"Invalid role specified. Must be one of: {', '.join(valid_roles)}"}), 400
+        
+        # Check for password update (admin can change/reset password)
+        if 'password' in data and data['password']: # If a new password is provided
+            updates_payload['hashed_password'] = generate_password_hash(data['password'])
+            app.logger.info(f"Admin is updating password for user {user_email_param}")
+
+        if not updates_payload:
+            return jsonify({"message": "No valid changes provided for the user."}), 200 # Or 304 Not Modified
+
+        # Perform the update against the user's ID
+        update_response = supabase.table('users').update(updates_payload).eq('id', user_to_update_id).execute()
+
+        if update_response.data:
+            updated_user_info = update_response.data[0]
+            # Prepare a clean response object, excluding sensitive info like password hash
+            user_for_response = {
+                "email": updated_user_info.get('email'), 
+                "username": updated_user_info.get('username'),
+                "role": updated_user_info.get('role')
+            }
+            return jsonify({"message": "User updated successfully", "user": user_for_response}), 200
+        else:
+            # This path might be taken if the update affected 0 rows but didn't error,
+            # or if there was a PostgREST error not caught as an exception.
+            error_detail = "Unknown database error during update."
+            if hasattr(update_response, 'error') and update_response.error:
+                error_detail = update_response.error.message
+                app.logger.error(f"Supabase error updating user {user_email_param}: {error_detail} | Details: {update_response.error.details}")
+
+            return jsonify({"error": f"Failed to update user: {error_detail}"}), 500
+
+    except Exception as e:
+        # This will catch errors from .single() if user not found, or other unexpected errors.
+        # Example: if .single() finds no user, it might raise a PostgrestAPIError or similar.
+        # We can check the type of e if needed for more specific error messages.
+        if "No rows found" in str(e) or (hasattr(e, 'code') and e.code == 'PGRST116'): # PGRST116 is PostgREST code for "requested range not satisfiable"
+            app.logger.warning(f"Attempt to update non-existent user: {user_email_param}")
+            return jsonify({"error": "User not found"}), 404
+        
+        app.logger.error(f"Exception in api_manage_update_user for {user_email_param}: {type(e).__name__} - {e}")
+        return jsonify({"error": f"An unexpected server error occurred."}), 500   
+@app.route('/api/admin/manage_users/<string:user_email_param>', methods=['DELETE'])
 @admin_required
-def api_manage_delete_user(user_email):
-    if user_email not in USERS_DB or USERS_DB[user_email].get("role") == 'admin':
-        return jsonify({"error": "User not found or cannot delete admin"}), 404
-    del USERS_DB[user_email]
-    return jsonify({"message": "User deleted successfully"}), 200
+def api_manage_delete_user(user_email_param):
+    try:
+        # Fetch the user to ensure they exist and are not admin before deleting
+        user_check_response = supabase.table('users').select("id, role").eq('email', user_email_param).execute()
 
+        if not user_check_response.data:
+            return jsonify({"error": "User not found"}), 404
+        
+        user_to_delete_role = user_check_response.data[0]['role']
+        user_to_delete_id = user_check_response.data[0]['id']
+
+        if user_to_delete_role == 'admin':
+            return jsonify({"error": "Cannot delete admin account"}), 403
+
+        # Perform delete against the user's ID for safety
+        delete_response = supabase.table('users').delete().eq('id', user_to_delete_id).execute()
+
+        if delete_response.data: # Successful delete usually returns the deleted record(s)
+            print(f"Admin deleted user {user_email_param}")
+            return jsonify({"message": "User deleted successfully"}), 200
+        else:
+            # error_msg = "Failed to delete user."
+            # if hasattr(delete_response, 'error') and delete_response.error:
+            #     error_msg += f" DB Error: {delete_response.error.message}"
+            # app.logger.error(f"User deletion failed for {user_email_param} with response: {delete_response}")
+            return jsonify({"error": "Failed to delete user due to a database issue."}), 500
+
+    except Exception as e:
+        app.logger.error(f"Exception in api_manage_delete_user for {user_email_param}: {e}")
+        return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
 # --- Admin API for PO Data Entry & Count ---
-@app.route('/api/admin/po_database_entry/<string:po_number>', methods=['DELETE'])
+            # app.py
+
+@app.route('/api/admin/po_database_entry/<string:po_number_param>', methods=['DELETE'])
 @admin_required
-def api_delete_po_database_entry(po_number):
-    if "po" in dummy_database and po_number in dummy_database["po"]:
-        del dummy_database["po"][po_number]
-        # Optional: Re-index or clean up if po_number was a numeric key that needs reordering
-        # For string keys, direct deletion is fine.
-        return jsonify({"message": f"PO entry '{po_number}' deleted successfully."}), 200
-    return jsonify({"error": f"PO entry '{po_number}' not found."}), 404
+def api_delete_po_database_entry(po_number_param):
+    if not po_number_param:
+        return jsonify({"error": "PO Number is required for deletion."}), 400
+        
+    try:
+        # Check if the entry exists before attempting to delete (optional but good for specific error message)
+        # check_response = supabase.table('admin_po_database_entries').select("po_number").eq('po_number', po_number_param).execute()
+        # if not check_response.data:
+        #     return jsonify({"error": f"PO entry '{po_number_param}' not found."}), 404
+
+        # Perform delete
+        delete_response = supabase.table('admin_po_database_entries').delete().eq('po_number', po_number_param).execute()
+
+        # delete() typically returns the deleted records in .data if successful and rows were affected.
+        # If no rows were affected (e.g., po_number didn't exist), .data might be empty.
+        if delete_response.data: 
+            return jsonify({"message": f"PO entry '{po_number_param}' deleted successfully."}), 200
+        else:
+            # This could mean the PO number didn't exist, or another issue occurred.
+            # Check if there was an error reported by PostgREST
+            # if hasattr(delete_response, 'error') and delete_response.error:
+            #     app.logger.error(f"Supabase error deleting PO {po_number_param}: {delete_response.error.message}")
+            #     return jsonify({"error": f"Database error: {delete_response.error.message}"}), 500
+            # If no error, but no data, it means the po_number was not found.
+            return jsonify({"error": f"PO entry '{po_number_param}' not found or already deleted."}), 404
+            
+    except Exception as e:
+        app.logger.error(f"Exception in api_delete_po_database_entry for {po_number_param}: {e}")
+        return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
 
 @app.route('/api/admin/po_database_entries', methods=['GET'])
+@admin_required
+def api_get_all_po_database_entries():
+    try:
+        # Select all relevant columns.
+        # The column names in the DB are 'po_number', 'vendor', 'phone', etc.
+        # The frontend JS (admin_dashboard.html) expects keys like "PO Number", "Vendor".
+        # So we need to map them back or select them with aliases if Supabase client supports it easily,
+        # or do the mapping in Python. Let's do mapping in Python for clarity.
+        
+        response = supabase.table('admin_po_database_entries').select("*").order('po_number').execute() # Fetch all POs
+
+        if response.data:
+            po_entries_for_frontend = []
+            for entry_from_db in response.data:
+                # Map database column names back to the "Label" names expected by JavaScript/frontend
+                # This assumes your MASTER_FIELD_DEFINITIONS["po"] labels are the keys your JS uses for table headers.
+                frontend_entry = {
+                    "PO Number": entry_from_db.get("po_number"), # Primary key, always include
+                    "Vendor": entry_from_db.get("vendor"),
+                    "Phone": entry_from_db.get("phone"),
+                    "Total": entry_from_db.get("total"),
+                    "Order Date": str(entry_from_db.get("order_date")) if entry_from_db.get("order_date") else None, # Convert date to string
+                    "Vendor Name": entry_from_db.get("vendor_name")
+                    # Add any other fields that your admin_dashboard.html existing PO table might try to display
+                }
+                # Filter out None values if you don't want them in the JSON response for fields not set
+                # frontend_entry = {k: v for k, v in frontend_entry.items() if v is not None}
+                po_entries_for_frontend.append(frontend_entry)
+            return jsonify(po_entries_for_frontend)
+        else:
+            # if response.error:
+            #     app.logger.error(f"Supabase error fetching PO entries: {response.error.message}")
+            #     return jsonify({"error": f"Database error: {response.error.message}"}), 500
+            return jsonify([]) # No PO entries found
+            
+    except Exception as e:
+        app.logger.error(f"Exception in api_get_all_po_database_entries: {e}")
+        return jsonify({"error": "An unexpected error occurred while fetching PO entries."}), 500
+    
 @admin_required
 def api_get_all_po_database_entries():
     # Return a list of PO entries. Each entry is a dict.
@@ -821,22 +1315,103 @@ def api_get_all_po_database_entries():
 @app.route('/api/admin/po_database_entry', methods=['POST'])
 @admin_required
 def api_add_po_data_entry():
-    data = request.json 
-    po_number = data.get("PO Number") 
-    if not po_number: return jsonify({"error": "PO Number is required."}), 400
+    form_data = request.json  # e.g., {"PO Number": "value", "Vendor": "value", ... }
     
-    valid_po_labels = {f["label"] for f in MASTER_FIELD_DEFINITIONS.get("po", [])}
-    entry_data = {key: value for key, value in data.items() if key in valid_po_labels and value.strip()}
-    if not entry_data.get("PO Number"): return jsonify({"error": "PO Number field data missing or not configured."}), 400
+    po_number_val = form_data.get("PO Number")
+    if not po_number_val or not po_number_val.strip():
+        return jsonify({"error": "PO Number is required and cannot be empty."}), 400
 
-    dummy_database["po"][po_number] = entry_data 
-    return jsonify({"message": f"PO data for '{po_number}' saved."}), 200
+    # Map frontend labels to database column names and prepare data for upsert
+    # Only include fields that are actually provided in the form_data
+    db_payload = {"po_number": po_number_val.strip()}
+
+    # Map from MASTER_FIELD_DEFINITIONS labels to DB columns if they exist in form_data
+    # Assumes DB columns are lowercase_with_underscore versions of labels or a direct mapping
+    # This mapping needs to be robust.
+    # For simplicity here, let's assume direct mapping for the known fields.
+    # You might want a more structured mapping if labels and DB columns differ significantly.
+    
+    # Fields from MASTER_FIELD_DEFINITIONS["po"] that the admin can configure for entry:
+    # {"id": "po_doc_number", "label": "PO Number"} -> po_number (PK, handled)
+    # {"id": "po_doc_vendor_id", "label": "Vendor"} -> vendor
+    # {"id": "po_doc_phone", "label": "Phone"}    -> phone
+    # {"id": "po_doc_total", "label": "Total"}      -> total
+    # {"id": "po_doc_order_date", "label": "Order Date"} -> order_date
+    # Let's add "Vendor Name" as it's in PO_FIELDS_FOR_USER_EXTRACTION and useful
+    
+    if "Vendor" in form_data and form_data["Vendor"].strip():
+        db_payload["vendor"] = form_data["Vendor"].strip()
+    if "Vendor Name" in form_data and form_data["Vendor Name"].strip(): # Assuming admin can configure "Vendor Name"
+        db_payload["vendor_name"] = form_data["Vendor Name"].strip()
+    if "Phone" in form_data and form_data["Phone"].strip():
+        db_payload["phone"] = form_data["Phone"].strip()
+    if "Total" in form_data and form_data["Total"].strip():
+        db_payload["total"] = form_data["Total"].strip()
+    if "Order Date" in form_data and form_data["Order Date"].strip():
+        # Ensure date is in YYYY-MM-DD for DATE column or handle conversion
+        # For simplicity, assuming frontend sends it correctly or it's text.
+        # If it's M/D/YYYY, you'd need to parse and reformat:
+        # try:
+        #     date_obj = datetime.strptime(form_data["Order Date"].strip(), '%m/%d/%Y')
+        #     db_payload["order_date"] = date_obj.strftime('%Y-%m-%d')
+        # except ValueError:
+        #     return jsonify({"error": "Invalid Order Date format. Please use MM/DD/YYYY or ensure it's correctly formatted for the database."}), 400
+        db_payload["order_date"] = form_data["Order Date"].strip() # Assuming it's YYYY-MM-DD or TEXT column handles it
+
+
+    # If it's a new entry, `created_at` and `updated_at` will be set by DB defaults.
+    # If it's an update, the trigger will handle `updated_at`.
+    # If you need to explicitly set them for an insert if no default:
+    # from datetime import datetime, timezone
+    # if not editing: # simplified logic for new entry
+    #    db_payload["created_at"] = datetime.now(timezone.utc).isoformat()
+    # db_payload["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+
+    if len(db_payload) <= 1 and "po_number" in db_payload: # Only po_number was provided
+        return jsonify({"error": "No data provided to save besides PO Number."}), 400
+
+    try:
+        # Upsert: inserts if po_number doesn't exist, updates if it does.
+        # The primary key 'po_number' is used by Supabase to determine if it's an insert or update.
+        response = supabase.table('admin_po_database_entries').upsert(db_payload).execute()
+
+        if response.data:
+            return jsonify({"message": f"PO data for '{po_number_val}' saved successfully."}), 200 # Or 201 if new
+        else:
+            # error_msg = f"Failed to save PO data for '{po_number_val}'."
+            # if hasattr(response, 'error') and response.error:
+            #     error_msg += f" DB Error: {response.error.message}"
+            # app.logger.error(f"PO upsert failed for {po_number_val} with response: {response}")
+            return jsonify({"error": "Failed to save PO data due to a database issue."}), 500
+            
+    except Exception as e:
+        app.logger.error(f"Exception in api_add_po_data_entry for {po_number_val}: {e}")
+        return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
+
+# app.py
 
 @app.route('/api/admin/po_database_count', methods=['GET'])
 @admin_required
 def api_get_po_database_count():
-    return jsonify({"count": len(dummy_database.get("po", {}))})
-
+    try:
+        # To get an exact count, PostgREST requires a specific header or function call.
+        # The `select` with `count='exact'` is the standard way.
+        response = supabase.table('admin_po_database_entries').select("po_number", count='exact').execute()
+        
+        # The count is available in response.count
+        if response.count is not None:
+            return jsonify({"count": response.count})
+        else:
+            # if response.error:
+            #     app.logger.error(f"Supabase error counting PO entries: {response.error.message}")
+            #     return jsonify({"error": f"Database error: {response.error.message}"}), 500
+            app.logger.warning(f"Supabase PO count returned None, response: {response}")
+            return jsonify({"count": 0}) # Default to 0 if count is None but no explicit error
+            
+    except Exception as e:
+        app.logger.error(f"Exception in api_get_po_database_count: {e}")
+        return jsonify({"error": "An unexpected error occurred while counting PO entries."}), 500
 
 # --- Admin APIs for ATS Criteria Management & Count ---
 @app.route('/api/admin/ats_criteria', methods=['GET'])
@@ -844,97 +1419,246 @@ def api_get_po_database_count():
 def api_get_ats_criteria():
     return jsonify(ATS_VALIDATION_CRITERIA_DB)
 
+
 @app.route('/api/admin/ats_criteria', methods=['POST'])
 @admin_required
 def api_add_ats_criterion():
     data = request.json
     field_label = data.get("field_label")
     condition_type = data.get("condition_type")
-    if not field_label or not condition_type: return jsonify({"error": "Field and condition type required."}), 400
-    if not any(f["label"] == field_label for f in MASTER_FIELD_DEFINITIONS.get("ats",[])): return jsonify({"error": f"Invalid ATS field: {field_label}"}), 400
+    is_active = data.get("is_active", True) # Default to True if not provided
+
+    # --- Basic Validation ---
+    if not field_label or not condition_type:
+        return jsonify({"error": "Field label and condition type are required."}), 400
+    if not any(f["label"] == field_label for f in MASTER_FIELD_DEFINITIONS.get("ats",[])):
+        return jsonify({"error": f"Invalid ATS field label: {field_label}"}), 400
+    # --- End Basic Validation ---
+
+    condition_values_payload = {} # To store specific values for the JSONB column
     
-    # Basic validation for values based on condition_type
-    # This can be expanded significantly
-    if condition_type in ["range_numeric", "min_numeric", "max_numeric"]:
-        if data.get("value1") is None: return jsonify({"error": "Value1 required for numeric conditions."}), 400
-        try: float(data.get("value1"))
-        except (ValueError, TypeError): return jsonify({"error": "Value1 must be a number for numeric conditions."}), 400
-        if condition_type == "range_numeric":
-            if data.get("value2") is None: return jsonify({"error": "Value2 required for numeric range."}), 400
-            try: float(data.get("value2"))
-            except (ValueError, TypeError): return jsonify({"error": "Value2 must be a number for numeric range."}), 400
+    # --- Validation and Payload Preparation for condition_values ---
+    if condition_type == "range_numeric":
+        if data.get("value1") is None or data.get("value2") is None:
+            return jsonify({"error": "value1 and value2 are required for numeric range."}), 400
+        try:
+            condition_values_payload["value1"] = float(data["value1"])
+            condition_values_payload["value2"] = float(data["value2"])
+        except ValueError:
+            return jsonify({"error": "value1 and value2 must be numbers for numeric range."}), 400
+    elif condition_type in ["min_numeric", "max_numeric", "equals_string"]:
+        if data.get("value1") is None:
+            return jsonify({"error": "value1 is required for this condition type."}), 400
+        if condition_type in ["min_numeric", "max_numeric"]:
+            try: condition_values_payload["value1"] = float(data["value1"])
+            except ValueError: return jsonify({"error": "value1 must be a number."}), 400
+        else: # equals_string
+            condition_values_payload["value1"] = str(data["value1"])
     elif condition_type == "contains_any":
-        if not data.get("keywords") or not isinstance(data.get("keywords"), list): return jsonify({"error": "Keywords (list) required for 'contains any'."}), 400
+        keywords = data.get("keywords")
+        if not keywords or not isinstance(keywords, list) or not all(isinstance(kw, str) for kw in keywords):
+            return jsonify({"error": "Keywords (a list of strings) are required for 'contains_any'."}), 400
+        condition_values_payload["keywords"] = keywords
     elif condition_type == "is_one_of":
-        if not data.get("options") or not isinstance(data.get("options"), list): return jsonify({"error": "Options (list) required for 'is one of'."}), 400
+        options = data.get("options")
+        if not options or not isinstance(options, list) or not all(isinstance(opt, str) for opt in options):
+            return jsonify({"error": "Options (a list of strings) are required for 'is_one_of'."}), 400
+        condition_values_payload["options"] = options
+    # --- End Validation and Payload Preparation ---
 
+    # Data to insert into the Supabase table
+    criterion_to_insert = {
+        "id": str(uuid.uuid4()), # Generate new UUID
+        "field_label": field_label,
+        "condition_type": condition_type,
+        "is_active": is_active,
+        "condition_values": condition_values_payload if condition_values_payload else None # Store as JSONB
+    }
 
-    new_criterion_id = str(uuid.uuid4())
-    new_criterion = {"id": new_criterion_id, "is_active": data.get("is_active", True), **data}
-    
-    if field_label not in ATS_VALIDATION_CRITERIA_DB: ATS_VALIDATION_CRITERIA_DB[field_label] = []
-    ATS_VALIDATION_CRITERIA_DB[field_label].append(new_criterion)
-    return jsonify({"message": "ATS criterion added.", "criterion": new_criterion}), 201
+    try:
+        response = supabase.table('admin_ats_criteria').insert(criterion_to_insert).execute()
 
-@app.route('/api/admin/ats_criteria/<string:field_label_url>/<string:criterion_id>', methods=['PUT'])
-@admin_required
-def api_update_ats_criterion(field_label_url, criterion_id): # field_label_url from path
-    data = request.json
-    field_label_payload = data.get("field_label") # field_label from payload
-
-    # Ensure field_label consistency or handle if it can be changed
-    if field_label_payload and field_label_payload != field_label_url:
-        # Logic to move criterion if field_label changes - complex, for now disallow or handle carefully
-        return jsonify({"error": "Changing field_label via update is not directly supported. Delete and re-add."}), 400
-    
-    target_field_label = field_label_url # Use the one from URL as primary key
-
-    if target_field_label not in ATS_VALIDATION_CRITERIA_DB: return jsonify({"error": f"No criteria for field: {target_field_label}"}), 404
-    
-    criterion_found = False
-    for i, crit in enumerate(ATS_VALIDATION_CRITERIA_DB[target_field_label]):
-        if crit["id"] == criterion_id:
-            # Update all fields except 'id' and potentially 'field_label' if it's immutable
-            update_data = {k:v for k,v in data.items() if k not in ['id', 'field_label']}
-            ATS_VALIDATION_CRITERIA_DB[target_field_label][i].update(update_data)
-            criterion_found = True
-            updated_criterion = ATS_VALIDATION_CRITERIA_DB[target_field_label][i]
-            break
+        if response.data:
+            # Return the created criterion (it will include DB defaults like created_at)
+            return jsonify({"message": "ATS criterion added successfully.", "criterion": response.data[0]}), 201
+        else:
+            # error_msg = "Failed to add ATS criterion."
+            # if hasattr(response, 'error') and response.error:
+            #     error_msg += f" DB Error: {response.error.message}"
+            # app.logger.error(f"ATS criterion add failed with response: {response}")
+            return jsonify({"error": "Failed to add ATS criterion due to a database issue."}), 500
             
-    if not criterion_found: return jsonify({"error": "Criterion ID not found."}), 404
-    return jsonify({"message": "ATS criterion updated.", "criterion": updated_criterion}), 200
+    except Exception as e:
+        app.logger.error(f"Exception in api_add_ats_criterion: {e}")
+        return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500 
+    
 
-
-@app.route('/api/admin/ats_criteria/<string:field_label>/<string:criterion_id>', methods=['DELETE'])
+@app.route('/api/admin/ats_criteria/<string:criterion_id_param>', methods=['PUT']) # field_label no longer needed in URL for update if ID is unique
 @admin_required
-def api_delete_ats_criterion(field_label, criterion_id):
-    if field_label not in ATS_VALIDATION_CRITERIA_DB: return jsonify({"error": f"No criteria for field: {field_label}"}), 404
+def api_update_ats_criterion(criterion_id_param):
+    data_from_request = request.json # This contains the FULL updated criterion from the form
+
+    # field_label_from_payload = data_from_request.get("field_label") # This will be the original field_label (JS disables changing it)
+    # condition_type_from_payload = data_from_request.get("condition_type")
+    # is_active_from_payload = data_from_request.get("is_active", True)
     
-    initial_len = len(ATS_VALIDATION_CRITERIA_DB[field_label])
-    ATS_VALIDATION_CRITERIA_DB[field_label] = [c for c in ATS_VALIDATION_CRITERIA_DB[field_label] if c["id"] != criterion_id]
+    # --- Basic Validation (similar to add, but less strict on presence of all fields if only some are updated) ---
+    # Ensure the criterion_id is what we expect
+    if not criterion_id_param:
+        return jsonify({"error": "Criterion ID is required for an update."}), 400
     
-    if len(ATS_VALIDATION_CRITERIA_DB[field_label]) == initial_len: return jsonify({"error": "Criterion ID not found."}), 404
-    if not ATS_VALIDATION_CRITERIA_DB[field_label]: del ATS_VALIDATION_CRITERIA_DB[field_label] # Clean up empty list
-    return jsonify({"message": "ATS criterion deleted."}), 200
+    # It's good practice to fetch the existing criterion to ensure it exists
+    # try:
+    #     existing_check = supabase.table('admin_ats_criteria').select("id").eq('id', criterion_id_param).single().execute()
+    #     if not existing_check.data:
+    #         return jsonify({"error": "Criterion not found for update."}), 404
+    # except Exception: # Catches error if .single() finds no record
+    #     return jsonify({"error": "Criterion not found for update (or multiple with same ID - should not happen)."}), 404
+    
+    # --- End Basic Validation ---
+
+    updates_payload = {} # Build the payload for Supabase .update()
+    
+    # Fields that can be directly updated
+    if "field_label" in data_from_request: updates_payload["field_label"] = data_from_request["field_label"] # Should not change as per JS
+    if "condition_type" in data_from_request: updates_payload["condition_type"] = data_from_request["condition_type"]
+    if "is_active" in data_from_request: updates_payload["is_active"] = data_from_request["is_active"]
+
+    # Rebuild condition_values from the submitted form data
+    condition_values_for_db = {}
+    condition_type = data_from_request.get("condition_type", updates_payload.get("condition_type")) # Use new or existing type
+
+    if condition_type == "range_numeric":
+        if data_from_request.get("value1") is not None and data_from_request.get("value2") is not None: # Ensure values are present
+            try:
+                condition_values_for_db["value1"] = float(data_from_request["value1"])
+                condition_values_for_db["value2"] = float(data_from_request["value2"])
+            except ValueError: return jsonify({"error": "value1 and value2 must be numbers."}), 400
+    elif condition_type in ["min_numeric", "max_numeric", "equals_string"]:
+        if data_from_request.get("value1") is not None:
+            if condition_type != "equals_string":
+                try: condition_values_for_db["value1"] = float(data_from_request["value1"])
+                except ValueError: return jsonify({"error": "value1 must be a number."}), 400
+            else:
+                condition_values_for_db["value1"] = str(data_from_request["value1"])
+    elif condition_type == "contains_any":
+        keywords = data_from_request.get("keywords")
+        if keywords is not None and isinstance(keywords, list): condition_values_for_db["keywords"] = keywords
+        elif keywords is not None: return jsonify({"error": "Keywords must be a list."}), 400
+    elif condition_type == "is_one_of":
+        options = data_from_request.get("options")
+        if options is not None and isinstance(options, list): condition_values_for_db["options"] = options
+        elif options is not None: return jsonify({"error": "Options must be a list."}), 400
+    
+    if condition_values_for_db: # Only add to payload if there's something to update/set
+        updates_payload["condition_values"] = condition_values_for_db
+    elif condition_type and not condition_values_for_db : # If type implies values but none provided, set to null or empty
+        updates_payload["condition_values"] = None
+
+
+    if not updates_payload:
+        return jsonify({"message": "No valid changes provided for criterion."}), 200
+
+    try:
+        response = supabase.table('admin_ats_criteria').update(updates_payload).eq('id', criterion_id_param).execute()
+
+        if response.data:
+            return jsonify({"message": "ATS criterion updated successfully.", "criterion": response.data[0]}), 200
+        else:
+            # This could mean the ID wasn't found, or another issue.
+            # error_msg = "Failed to update ATS criterion. It might not exist or an error occurred."
+            # if hasattr(response, 'error') and response.error:
+            #     error_msg = f"DB Error: {response.error.message}"
+            # app.logger.error(f"ATS criterion update failed for ID {criterion_id_param} with response: {response}")
+            return jsonify({"error": "Failed to update ATS criterion (possibly not found or no changes made)."}), 404 # 404 if not found
+            
+    except Exception as e:
+        app.logger.error(f"Exception in api_update_ats_criterion for ID {criterion_id_param}: {e}")
+        return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
+
+@app.route('/api/admin/ats_criteria/<string:criterion_id_param>', methods=['DELETE']) # field_label no longer needed in URL for delete if ID is unique
+@admin_required
+def api_delete_ats_criterion(criterion_id_param):
+    if not criterion_id_param:
+         return jsonify({"error": "Criterion ID is required for deletion."}), 400
+    try:
+        # Optional: Check if it exists first for a more specific "not found"
+        # check_response = supabase.table('admin_ats_criteria').select("id").eq('id', criterion_id_param).execute()
+        # if not check_response.data:
+        #     return jsonify({"error": f"Criterion with ID '{criterion_id_param}' not found."}), 404
+
+        response = supabase.table('admin_ats_criteria').delete().eq('id', criterion_id_param).execute()
+
+        if response.data: # Successful delete usually returns the deleted record(s)
+            return jsonify({"message": "ATS criterion deleted successfully."}), 200
+        else:
+            # error_msg = f"Failed to delete criterion ID '{criterion_id_param}'. It might not exist."
+            # if hasattr(response, 'error') and response.error:
+            #     error_msg = f"DB Error: {response.error.message}"
+            # app.logger.error(f"ATS criterion delete failed for ID {criterion_id_param} with response: {response}")
+            return jsonify({"error": f"Failed to delete criterion (ID: {criterion_id_param}). It may not exist or an error occurred."}), 404 # 404 if not found
+            
+    except Exception as e:
+        app.logger.error(f"Exception in api_delete_ats_criterion for ID {criterion_id_param}: {e}")
+        return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
+   
+     # app.py
 
 @app.route('/api/admin/ats_criteria_count', methods=['GET'])
 @admin_required
 def api_get_ats_criteria_count():
-    active_count = 0
-    for field_label, criteria_list in ATS_VALIDATION_CRITERIA_DB.items():
-        for criterion in criteria_list:
-            if criterion.get("is_active", False):
-                active_count += 1
-    return jsonify({"active_count": active_count, "total_count": sum(len(v) for v in ATS_VALIDATION_CRITERIA_DB.values())})
+    try:
+        # Count active criteria
+        active_response = supabase.table('admin_ats_criteria').select("id", count='exact').eq('is_active', True).execute()
+        active_count = active_response.count if active_response.count is not None else 0
 
+        # Count total criteria (optional, if needed by frontend)
+        # total_response = supabase.table('admin_ats_criteria').select("id", count='exact').execute()
+        # total_count = total_response.count if total_response.count is not None else 0
+        
+        return jsonify({"active_count": active_count}) #, "total_count": total_count})
+            
+    except Exception as e:
+        app.logger.error(f"Exception in api_get_ats_criteria_count: {e}")
+        return jsonify({"error": "An unexpected error occurred while counting ATS criteria."}), 500
+      
 
-# --- Main Execution ---
 if __name__ == '__main__':
-    print("-" * 60)
-    print("Flask App Starting...")
-    print(f"SECRET_KEY: {'Set by ENV or Default' if app.secret_key else 'Using Default Temporary'}")
-    print(f"OCR_SPACE_API_KEY: {'Set by ENV' if OCR_SPACE_API_KEY != 'K87955728688957' else 'Using Placeholder K87...'}")
-    print("Available User Tabs:", list(AVAILABLE_TABS.keys()))
-    print("WARNING: All data (Users, PO DB, ATS Criteria, Resumes) stored IN-MEMORY and will be lost on restart.")
-    print("-" * 60)
+    # With Supabase, table creation is usually managed via the Supabase dashboard (SQL Editor / Table Editor)
+    # or Supabase CLI migrations. We don't need db.create_all() from SQLAlchemy.
+    # However, we can still seed the initial admin user here if it doesn't exist.
+
+    print("Checking for initial admin user in Supabase...")
+    try:
+        admin_check_response = supabase.table('users').select("id").eq('email', 'admin@example.com').execute()
+        
+        if not admin_check_response.data: # If list is empty, user not found
+            admin_default_password = os.environ.get('ADMIN_INITIAL_PASSWORD', 'admin@a123')
+            admin_user_data = {
+                "email": 'admin@example.com',
+                "username": 'admin_user',
+                "hashed_password": generate_password_hash(admin_default_password), # Make sure generate_password_hash is imported
+                "role": 'admin'
+            }
+            insert_response = supabase.table('users').insert(admin_user_data).execute()
+            if insert_response.data:
+                print(f"Initial admin user 'admin@example.com' created successfully.")
+            else:
+                # Attempt to access error from PostgrestAPIResponse if available
+                error_message = "Unknown error during admin user creation."
+                if hasattr(insert_response, 'error') and insert_response.error:
+                    error_message = insert_response.error.message
+                elif hasattr(insert_response, 'status_code') and insert_response.status_code != 201:
+                    error_message = f"Status: {insert_response.status_code}, Body: {getattr(insert_response, 'data', '')}"
+
+                print(f"Failed to create initial admin user: {error_message}")
+                # You might want to raise an error here or handle it more gracefully depending on strictness
+        else:
+            print("Admin user 'admin@example.com' already exists.")
+    except Exception as e:
+        print(f"CRITICAL ERROR during initial admin user check/creation with Supabase: {e}")
+        print("Please ensure your Supabase connection is correct and the 'users' table exists with the correct schema.")
+    
+    print(f"Starting Flask app on http://0.0.0.0:5000")
+    print(f"Attempting to connect to Supabase at URL: {supabase_url[:20]}... (URL partially hidden for brevity)") # Show part of URL
     app.run(debug=True, host='0.0.0.0', port=5000)

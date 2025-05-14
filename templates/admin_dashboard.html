@@ -210,7 +210,7 @@
                     <option value="contains_any">Contains Any Keyword(s) (e.g., Skills: Java, Python)</option>
                     <option value="equals_string">Equals String (e.g., Gender: Male)</option>
                     <option value="min_numeric">Min Numeric Value (e.g., Experience >= 2 years)</option>
-                    <option value="max_numeric">Max Numeric Value (e.g., Salary <= 50000)</option>
+                    <option value="max_numeric">Max Numeric Value (e.g., Salary = 50000)</option>
                     <option value="is_one_of">Is One Of (Strings) (e.g., City: London, Paris)</option>
                 </select></div>
                 <div id="atsCriterionValuesContainer" class="mb-3"></div>
@@ -219,6 +219,35 @@
         </div>
         <div class="modal-footer"><button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button><button type="submit" class="btn btn-primary" form="atsCriterionForm" id="saveAtsCriterionBtn"><span class="spinner-border spinner-border-sm d-none me-1"></span>Save Criterion</button></div>
     </div></div></div>
+
+    <div class="modal fade" id="editPOEntryModal" tabindex="-1" aria-labelledby="editPOEntryModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="editPOEntryModalLabel"><i class="bi bi-pencil-square me-2"></i>Edit PO Entry</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="alert alert-danger d-none" id="editPOFormAlert"></div>
+                <form id="editPOEntryForm_inner">
+                    <input type="hidden" id="editOriginalPONumber" name="original_po_number"> <!-- To identify the PO being edited -->
+                    
+                    <div id="edit-po-data-fields-list" class="row">
+                        <!-- Dynamic input fields for editing will be injected here by JavaScript -->
+                        <p class="text-muted col-12">Loading PO data for editing...</p>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="submit" class="btn btn-primary" form="editPOEntryForm_inner" id="submitEditPOBtn">
+                    <span class="spinner-border spinner-border-sm d-none me-1"></span>Save Changes
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     
@@ -279,6 +308,24 @@ document.addEventListener('DOMContentLoaded', () => {
     const currentConfigTypeInput = document.getElementById('currentConfigType');
     const masterFieldsCheckboxList = document.getElementById('master-fields-checkbox-list');
     const saveFieldConfigurationBtn = document.getElementById('saveFieldConfigurationBtn');
+     
+    const existingPoDataTable = document.getElementById('existingPoDataTable'); // The table itself
+    const existingPoDataTableHeadRow = document.querySelector('#existingPoDataTable thead tr');
+    const existingPoDataTableBody = document.getElementById('existingPoDataTableBody');
+    const noExistingPoDataRow = document.getElementById('no-existing-po-data-row');
+    const existingPoDataAlert = document.getElementById('existing-po-data-alert'); // Alert for the existing PO table
+
+    // Edit PO Modal Elements
+    const editPOEntryModalEl = document.getElementById('editPOEntryModal');
+    const editPOEntryModalInstance = editPOEntryModalEl ? bootstrap.Modal.getOrCreateInstance(editPOEntryModalEl) : null;
+    const editPOEntryModalLabel = document.getElementById('editPOEntryModalLabel');
+    const editPOFormInner = document.getElementById('editPOEntryForm_inner');
+    const editPOFieldsList = document.getElementById('edit-po-data-fields-list');
+    const editOriginalPONumberInput = document.getElementById('editOriginalPONumber');
+    const editPOFormAlert = document.getElementById('editPOFormAlert');
+    const submitEditPOBtn = document.getElementById('submitEditPOBtn');
+
+    let currentEditingPONumber = null; // To keep track of which PO is being edited
 
     // State
     let adminConfiguredFields = { 
@@ -510,7 +557,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 </div>`);
         });
     }
-    if (poDataEntryForm) { /* ... (keep implementation, ensure PO Number is validated) ... */ 
+
+    if (poDataEntryForm) {  
+
         poDataEntryForm.addEventListener('submit', async (event) => {
             event.preventDefault(); event.stopPropagation();
             hideAlert(poDataFormAlert);
@@ -538,6 +587,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (!response.ok) throw new Error(result.error || "Failed to save PO data.");
                 showFlashMessage(result.message, 'success');
                 poDataEntryForm.reset(); 
+                 loadAndDisplayExistingPOData(); // Reload existing PO data
                 updateDashboardCounts(); // Update PO DB count
             } catch (error) { showAlert(poDataFormAlert, `Error: ${error.message}`, 'danger');
             } finally { toggleButtonSpinner(submitPODataBtn, false); }
@@ -768,97 +818,246 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-
-                async function loadAndDisplayExistingPOData() {
-                     console.log("loadAndDisplayExistingPOData function EXECUTED.");
-                    const tableBody = document.getElementById('existingPoDataTableBody');
-                    const tableHeadRow = document.querySelector('#existingPoDataTable thead tr');
-                    const noDataRow = document.getElementById('no-existing-po-data-row');
-                    const existingPoDataAlert = document.getElementById('existing-po-data-alert');
-
-                    if (!tableBody || !tableHeadRow || !noDataRow) return;
-
-                    hideAlert(existingPoDataAlert);
-                    tableBody.innerHTML = `<tr><td colspan="10" class="text-center text-muted py-3"><div class="spinner-border spinner-border-sm"></div> Loading existing PO data...</td></tr>`; // Colspan large enough
-
-                    try {
-                        const response = await fetch('/api/admin/po_database_entries', { credentials: 'same-origin' });
-                            if (!response.ok) throw new Error(`Failed to load existing PO data: ${response.statusText} (Status: ${response.status})`); // Added status
-                            const poEntries = await response.json();
-
-                        tableBody.innerHTML = ''; // Clear loading message
-                        tableHeadRow.innerHTML = ''; // Clear old headers
-
-                        if (poEntries.length === 0) {
-                            if (noDataRow) noDataRow.style.display = 'table-row';
-                            tableHeadRow.innerHTML = '<th>Info</th>'; // Placeholder header
-                            tableBody.innerHTML = '<tr><td class="text-center text-muted py-3">No PO data found in the database.</td></tr>';
-                            return;
-                        }
-
-                        if (noDataRow) noDataRow.style.display = 'none';
-
-                        // Determine table headers dynamically from the first entry,
-                        // prioritizing configured fields, then PO Number, then others.
-                        const configuredPOFields = adminConfiguredFields.po || [];
-                            let headers = [];
-                            if (configuredPOFields.includes("PO Number")) {
-                                headers.push("PO Number");
-                            } else if (poEntries.length > 0 && "PO Number" in poEntries[0] && !headers.includes("PO Number")) {
-                                headers.push("PO Number");
-                            }
-
-                        configuredPOFields.forEach(label => {
-                            if (label !== "PO Number" && !headers.includes(label)) {
-                                headers.push(label);
-                            }
-                        });
-                        // Add any other fields present in data but not in configured (less common for admin entry)
-                        Object.keys(poEntries[0]).forEach(key => {
-                            if (!headers.includes(key) && key !== "PO Number") { // PO Number already handled
-                                // Optional: only add if it's part of MASTER_FIELD_DEFINITIONS.po
-                                if ((ADMIN_CONFIGURABLE_FIELDS_PY.po || []).some(f => f.label === key)) {
-                                    headers.push(key);
-                                }
-                            }
-                        });
-
-
-                        if (headers.length === 0 && poEntries.length > 0) { // Fallback if no headers derived but data exists
-                            headers = Object.keys(poEntries[0]);
-                        }
-                        
-                        headers.forEach(header => {
-                            const th = document.createElement('th');
-                            th.textContent = header;
-                            tableHeadRow.appendChild(th);
-                        });
-                        tableHeadRow.appendChild(document.createElement('th')).textContent = 'Actions'; // Actions column
-
-                        poEntries.forEach(entry => {
-                            const row = tableBody.insertRow();
-                            headers.forEach(header => {
-                                row.insertCell().textContent = entry[header] !== undefined ? entry[header] : 'N/A';
-                            });
-                            const actionsCell = row.insertCell();
-                            actionsCell.classList.add('text-center');
-                            const editButton = document.createElement('button');
-                            editButton.classList.add('btn', 'btn-sm', 'btn-outline-primary', 'btn-edit-existing-po');
-                            editButton.innerHTML = '<i class="bi bi-pencil-square"></i>';
-                            editButton.title = 'Edit PO Entry';
-                            editButton.addEventListener('click', () => populatePOFormForEdit(entry));
-                            actionsCell.appendChild(editButton);
-                            // Optional: Add a delete button here if needed
-                        });
-
-                    } catch (error) {
-                        console.error("Error loading existing PO data:", error);
-                        showAlert(existingPoDataAlert, `Error: ${error.message}`, 'danger');
-                        tableBody.innerHTML = `<tr><td colspan="${(tableHeadRow.cells.length || 1)}" class="text-center text-danger">Failed to load PO data.</td></tr>`;
+      async function handleDeletePOEntry(poNumber, buttonElement) {
+            if (!poNumber) {
+                showFlashMessage("PO Number is missing, cannot delete.", "danger");
+                return;
+            }
+            if (confirm(`Are you sure you want to delete PO entry: ${poNumber}?`)) {
+                if(buttonElement) toggleButtonSpinner(buttonElement, true);
+                try {
+                    const response = await fetch(`/api/admin/po_database_entry/${encodeURIComponent(poNumber)}`, {
+                        method: 'DELETE',
+                        credentials: 'same-origin'
+                    });
+                    const result = await response.json();
+                    if (!response.ok) {
+                        throw new Error(result.error || `Failed to delete PO entry ${poNumber}.`);
                     }
+                    showFlashMessage(result.message || `PO entry ${poNumber} deleted.`, 'success');
+                    loadAndDisplayExistingPOData(); // Refresh table
+                    updateDashboardCounts();      // Update dashboard counts
+                } catch (error) {
+                    console.error("Error deleting PO entry:", error);
+                    showFlashMessage(`Error: ${error.message}`, 'danger');
+                } finally {
+                    if(buttonElement) toggleButtonSpinner(buttonElement, false);
                 }
-              
-            function populatePOFormForEdit(poEntry) {
+            }
+        }
+
+        async function loadAndDisplayExistingPOData() {
+            console.log("loadAndDisplayExistingPOData function EXECUTED."); // Keep for debug
+            if (!existingPoDataTableBody || !existingPoDataTableHeadRow || !noExistingPoDataRow) {
+                console.error("One or more elements for existing PO data table are missing.");
+                return;
+            }
+            if(existingPoDataAlert) hideAlert(existingPoDataAlert); // Hide previous alerts
+
+            existingPoDataTableBody.innerHTML = `<tr><td colspan="10" class="text-center text-muted py-3"><div class="spinner-border spinner-border-sm"></div> Loading existing PO data...</td></tr>`;
+            
+            try {
+                const response = await fetch('/api/admin/po_database_entries', { credentials: 'same-origin' });
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({error: `Server error: ${response.status}`}));
+                    throw new Error(errorData.error || `Failed to load PO data: ${response.statusText}`);
+                }
+                const poEntries = await response.json();
+
+                existingPoDataTableBody.innerHTML = '';
+                existingPoDataTableHeadRow.innerHTML = '';
+
+                if (poEntries.length === 0) {
+                    if (noExistingPoDataRow) noExistingPoDataRow.style.display = 'table-row';
+                    existingPoDataTableHeadRow.innerHTML = '<th>Info</th>';
+                    existingPoDataTableBody.innerHTML = '<tr><td colspan="1" class="text-center text-muted py-3">No PO data found in the database.</td></tr>';
+                    return;
+                }
+
+                if (noExistingPoDataRow) noExistingPoDataRow.style.display = 'none';
+
+                // Dynamically determine headers based on configured fields + PO Number + other found fields
+                let headers = [];
+                const configuredPOFields = adminConfiguredFields.po || []; // Labels
+
+                // Ensure "PO Number" is first if it's a configured field or present
+                if (configuredPOFields.includes("PO Number")) {
+                    headers.push("PO Number");
+                } else if (poEntries[0] && "PO Number" in poEntries[0]) {
+                    headers.push("PO Number");
+                }
+                
+                // Add other configured fields
+                configuredPOFields.forEach(label => {
+                    if (label !== "PO Number" && !headers.includes(label)) headers.push(label);
+                });
+
+                // Add any other fields found in the data that might not be in current config (display only)
+                if (poEntries[0]) {
+                    Object.keys(poEntries[0]).forEach(key => {
+                        if (!headers.includes(key)) headers.push(key);
+                    });
+                }
+                // If somehow no headers, use keys from first entry (should not happen if PO Number is always there)
+                if (headers.length === 0 && poEntries.length > 0) headers = Object.keys(poEntries[0]);
+
+
+                headers.forEach(header => {
+                    const th = document.createElement('th');
+                    th.textContent = header;
+                    existingPoDataTableHeadRow.appendChild(th);
+                });
+                existingPoDataTableHeadRow.appendChild(document.createElement('th')).textContent = 'Actions';
+
+                poEntries.forEach(entry => {
+                    const row = existingPoDataTableBody.insertRow();
+                    headers.forEach(header => {
+                        row.insertCell().textContent = entry[header] !== undefined ? entry[header] : 'N/A';
+                    });
+                    const actionsCell = row.insertCell();
+                    actionsCell.classList.add('text-center');
+                    
+                    // Edit Button (to open modal)
+                    const editButton = document.createElement('button');
+                    editButton.classList.add('btn', 'btn-sm', 'btn-outline-primary', 'me-1', 'btn-edit-existing-po');
+                    editButton.innerHTML = '<i class="bi bi-pencil-square"></i>';
+                    editButton.title = 'Edit PO Entry';
+                    editButton.dataset.poNumber = entry["PO Number"]; // Store PO Number for identification
+                    editButton.addEventListener('click', () => handleEditPOButtonClick(entry)); // Call new handler
+                    actionsCell.appendChild(editButton);
+
+                    // Delete Button
+                    const deleteButton = document.createElement('button');
+                    deleteButton.classList.add('btn', 'btn-sm', 'btn-outline-danger', 'btn-delete-existing-po');
+                    deleteButton.innerHTML = '<i class="bi bi-trash"></i>';
+                    deleteButton.title = 'Delete PO Entry';
+                    deleteButton.dataset.poNumber = entry["PO Number"]; // Store PO Number
+                    deleteButton.addEventListener('click', () => handleDeletePOEntry(entry["PO Number"], deleteButton));
+                    actionsCell.appendChild(deleteButton);
+                });
+
+            } catch (error) {
+                console.error("Error loading existing PO data:", error);
+                if(existingPoDataAlert) showAlert(existingPoDataAlert, `Error: ${error.message}`, 'danger');
+                existingPoDataTableBody.innerHTML = `<tr><td colspan="${(existingPoDataTableHeadRow.cells.length || 1)}" class="text-center text-danger">Failed to load PO data.</td></tr>`;
+            }
+        }
+                
+     function handleEditPOButtonClick(poEntryToEdit) {
+            if (!poEntryToEdit || !poEntryToEdit["PO Number"]) {
+                showFlashMessage("Invalid PO data for editing.", "danger");
+                return;
+            }
+            currentEditingPONumber = poEntryToEdit["PO Number"]; // Store the original PO number being edited
+
+            if(editPOEntryModalLabel) editPOEntryModalLabel.textContent = `Edit PO Entry: ${currentEditingPONumber}`;
+            if(editOriginalPONumberInput) editOriginalPONumberInput.value = currentEditingPONumber; // Store original PO for backend
+            if(editPOFormAlert) hideAlert(editPOFormAlert);
+            if(editPOFormInner) editPOFormInner.reset(); // Reset form for new data
+            if(editPOFieldsList) editPOFieldsList.innerHTML = ''; // Clear previous fields
+
+            // Populate the modal form fields based on adminConfiguredFields.po
+            const configuredFieldsForEntry = adminConfiguredFields.po || [];
+            if (configuredFieldsForEntry.length === 0) {
+                editPOFieldsList.innerHTML = '<p class="text-muted col-12">No PO fields are configured for editing. Please configure them first.</p>';
+            } else {
+                configuredFieldsForEntry.forEach(label => {
+                    const fieldDef = (ADMIN_CONFIGURABLE_FIELDS_PY.po || []).find(f => f.label === label);
+                    const inputId = `edit-po-modal-${fieldDef ? fieldDef.id : label.replace(/\W+/g, '-')}`; // Unique ID for modal inputs
+                    const isPONumberField = (label === "PO Number");
+                    
+                    editPOFieldsList.insertAdjacentHTML('beforeend', `
+                        <div class="col-md-6 extraction-input-group">
+                            <label for="${inputId}" class="form-label">${escapeHTML(label)}${isPONumberField ? "*" : ""}</label>
+                            <input type="text" class="form-control form-control-sm" id="${inputId}" 
+                                name="${escapeHTML(label)}" 
+                                placeholder="Enter ${escapeHTML(label)}"
+                                value="${escapeHTML(poEntryToEdit[label] || '')}" 
+                                ${isPONumberField ? "required" : ""}
+                                ${isPONumberField && currentEditingPONumber ? "" : ""}> 
+                                    <!-- PO Number is critical, usually not changed. If changed, it's like a new entry. -->
+                                    <!-- For now, let's allow editing, backend upsert will handle it. -->
+                            ${fieldDef && fieldDef.description ? `<small class="form-text text-muted">${escapeHTML(fieldDef.description)}</small>` : ''}
+                        </div>`);
+                });
+            }
+            if(editPOEntryModalInstance) editPOEntryModalInstance.show();
+        }
+     
+       if (editPOFormInner && editPOEntryModalInstance) {
+    editPOFormInner.addEventListener('submit', async function(event) {
+        event.preventDefault();
+        event.stopPropagation();
+        if(editPOFormAlert) hideAlert(editPOFormAlert);
+
+        if (!this.checkValidity()) {
+            this.classList.add('was-validated');
+            showAlert(editPOFormAlert, 'Please fill all required fields (PO Number).', 'warning');
+            return;
+        }
+        this.classList.remove('was-validated');
+
+        const formData = new FormData(this);
+        const poDataForUpdate = {};
+        let newPONumber = null;
+
+        for (let [key, value] of formData.entries()) {
+            if (key === "original_po_number") continue; // Skip this hidden input
+            poDataForUpdate[key] = value.trim();
+            if (key === "PO Number") {
+                newPONumber = value.trim();
+            }
+        }
+        
+        if (!newPONumber) { // PO Number from the form field
+             showAlert(editPOFormAlert, 'PO Number is required and cannot be empty in the form.', 'warning');
+             return;
+        }
+        // The original_po_number is still currentEditingPONumber, which the upsert logic can use if po_number itself changes
+        // However, our current upsert in app.py uses the PO Number from the payload as the key.
+        // If PO Number changes, it will effectively create a new entry and the old one might remain.
+        // For a true update where PO Number might change, the API would need original_po_number.
+        // For simplicity now, we assume PO Number in the form IS the key for upsert.
+        // If currentEditingPONumber != newPONumber, it means user changed the PO Number.
+        // The backend will treat newPONumber as the primary key for the upsert.
+
+        toggleButtonSpinner(submitEditPOBtn, true);
+        try {
+            // The POST to /api/admin/po_database_entry will act as an UPSERT
+            const response = await fetch('/api/admin/po_database_entry', {
+                method: 'POST', // Using POST for upsert as per current backend
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(poDataForUpdate),
+                credentials: 'same-origin'
+            });
+            const result = await response.json();
+            if (!response.ok) {
+                throw new Error(result.error || "Failed to update PO entry.");
+            }
+            showFlashMessage(result.message || "PO entry updated successfully.", 'success');
+            editPOEntryModalInstance.hide();
+            loadAndDisplayExistingPOData(); // Refresh the table
+            updateDashboardCounts();      // Update dashboard counts
+
+            // If PO Number was changed, and you want to delete the old entry if it was a "rename"
+            if (currentEditingPONumber && newPONumber && currentEditingPONumber !== newPONumber) {
+                // This implies the upsert created a new entry for newPONumber.
+                // We should now delete the old entry with currentEditingPONumber.
+                console.log(`PO Number changed from ${currentEditingPONumber} to ${newPONumber}. Deleting old entry.`);
+                await handleDeletePOEntry(currentEditingPONumber, null); // Pass null as button, it won't be spun
+            }
+
+        } catch (error) {
+            console.error("Error updating PO entry:", error);
+            showAlert(editPOFormAlert, `Error: ${error.message}`, 'danger');
+        } finally {
+            toggleButtonSpinner(submitEditPOBtn, false);
+            currentEditingPONumber = null; // Reset
+        }
+    });
+}
+
+ function populatePOFormForEdit(poEntry) {
     const poDataEntryForm = document.getElementById('poDataEntryForm');
     const poDataEntryFieldsList = document.getElementById('po-data-entry-fields-list'); // Parent of input fields
     const savePODataContainer = document.getElementById('savePODataContainer');
