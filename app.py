@@ -77,7 +77,7 @@ MASTER_FIELD_DEFINITIONS = {
 }
 
 # --- Fields for User-Side Extraction (Fixed Sets) ---
-PO_FIELDS_FOR_USER_EXTRACTION = ["PO Number", "Vendor", "Phone", "Total", "Order Date", "Vendor Name"]
+PO_FIELDS_FOR_USER_EXTRACTION = ["PO Number", "Vendor", "Phone", "Total", "Order Date"]
 ATS_FIELDS_FOR_USER_EXTRACTION = ["Sr no.", "Name", "Gender", "Phone", "City", "Age", "Country", "Address", "Email", "Skills","Salary", "Percentage"]
 
 # --- Fields for PO Comparison (Against Admin-Entered DB) ---
@@ -234,90 +234,88 @@ def extract_structured_data(text, fields_to_extract_labels, upload_type=None):
     if not text or not fields_to_extract_labels: return {}
     data = {label: None for label in fields_to_extract_labels}
     lines = text.strip().split('\n')
-    text_lower = text.lower()
+    # text_lower = text.lower() # Already defined later
 
-    # Generic Key-Value (improved slightly)
+    # --- Generic Key-Value Extraction (as a fallback or for simple fields) ---
+    # (Your existing generic logic here - might need review if it's picking up labels as values)
+    # For now, let's rely more on specific extraction for PO
     for i, line_text in enumerate(lines):
         line_strip = line_text.strip()
         for field_label in fields_to_extract_labels:
-            if data[field_label] is not None: continue # Already found by more specific logic or previous generic
+            if data[field_label] is not None: continue 
 
-            # Try exact label match first: "Label: Value" or "Label Value" (if value is on same line)
-            # More robust: allows for variations in spacing and optional colon
             pattern_label = re.escape(field_label)
             match = re.match(r"^\s*" + pattern_label + r"\s*[:\-]?\s*(.+)", line_strip, re.IGNORECASE)
             if match:
                 value = match.group(1).strip()
-                if value: data[field_label] = value; break # Found for this field_label, move to next field_label
-
-            # Fallback: if label is found anywhere in line, and next line might be value
+                if value: data[field_label] = value; break 
+            
+            # Simple check: if label is in line, try next line as value (if next line isn't another label)
             if field_label.lower() in line_strip.lower() and i + 1 < len(lines):
                 next_line_strip = lines[i+1].strip()
-                # Avoid matching if next line also looks like a label for another field
-                if next_line_strip and not any(other_label.lower() + ":" in next_line_strip.lower() for other_label in fields_to_extract_labels if other_label != field_label):
-                    if not data[field_label]: # Only if not already found
-                         data[field_label] = next_line_strip
-
+                is_next_line_a_label = False
+                for other_label in fields_to_extract_labels:
+                    if next_line_strip.lower().startswith(other_label.lower() + ":") or next_line_strip.lower().startswith(other_label.lower() + " "):
+                        is_next_line_a_label = True
+                        break
+                if next_line_strip and not is_next_line_a_label:
+                    if not data[field_label]: data[field_label] = next_line_strip
 
     if upload_type == 'po':
-        # PO Number (using sample doc: "PO Number: 81100")
+        # PO Number (sample: "PO Number: 81100" on page 1, also header on page 2)
         if "PO Number" in fields_to_extract_labels and data["PO Number"] is None:
-            m = re.search(r"PO Number\s*:\s*([A-Z0-9\-]+)", text, re.IGNORECASE)
+            m = re.search(r"PO\s*Number\s*:\s*([A-Z0-9\-]+)", text, re.IGNORECASE)
             if m: data["PO Number"] = m.group(1).strip()
-        
-        # Order Date (using sample doc: "Order Date: 8/8/2024")
+
+        # Order Date (sample: "Order Date: 8/8/2024")
         if "Order Date" in fields_to_extract_labels and data["Order Date"] is None:
-            m = re.search(r"Order Date\s*:\s*(\d{1,2}/\d{1,2}/\d{2,4})", text, re.IGNORECASE)
+            m = re.search(r"Order\s*Date\s*:\s*(\d{1,2}/\d{1,2}/\d{2,4})", text, re.IGNORECASE)
             if m: data["Order Date"] = m.group(1).strip()
 
-        # Vendor ID (using sample doc: "Vendor: S101334")
+        # Vendor ID (sample: "Vendor: S101334" under "Vendor:")
         if "Vendor" in fields_to_extract_labels and data["Vendor"] is None: # "Vendor" is the label for Vendor ID
-            m = re.search(r"\bVendor\s*:\s*(S\d+)\b", text, re.IGNORECASE)
+            # Target specifically the line "Vendor: SXXXXX"
+            m = re.search(r"^\s*Vendor\s*:\s*(S\d+)\s*$", text, re.IGNORECASE | re.MULTILINE)
             if m: data["Vendor"] = m.group(1).strip()
         
-        # Vendor Name (using sample doc: "PROTOMATIC, INC." under "Vendor:")
-        if "Vendor Name" in fields_to_extract_labels and data["Vendor Name"] is None:
-            # Look for a line starting with a known company suffix after "Vendor:"
-            # This is tricky due to varying formats. Sample doc has it on next line.
-            m_block = re.search(r"Vendor\s*:\s*\n\s*([A-Z][A-Za-z\s.,&'-]+(?:INC\.|LLC|LTD|CO\.?)\b)", text, re.IGNORECASE | re.MULTILINE)
-            if m_block: data["Vendor Name"] = m_block.group(1).strip()
-            else: # Fallback if it's not immediately after "Vendor:" line
-                m_name = re.search(r"^(PROTOMATIC,\s*INC\.)$", text, re.MULTILINE | re.IGNORECASE) # Specific for sample
-                if m_name: data["Vendor Name"] = m_name.group(1).strip()
-
-
-        # Phone (using sample doc: "Phone: 734-426-3655" associated with vendor)
+        # Vendor Phone (sample: "Phone: 734-426-3655" under "Vendor:")
         if "Phone" in fields_to_extract_labels and data["Phone"] is None:
-            # Look for phone after "Vendor:" block or near vendor details
-            vendor_block_match = re.search(r"Vendor\s*:.*?Phone\s*:\s*(\(?\d{3}\)?[\s\.\-]?\d{3}[\s\.\-]?\d{4}(?:\s*x\d+)?)", text, re.IGNORECASE | re.DOTALL)
-            if vendor_block_match:
-                data["Phone"] = vendor_block_match.group(1).strip()
-            else: # More generic phone search if not tied to vendor block
-                m_phone = re.search(r"Phone\s*:\s*(\(?\d{3}\)?[\s\.\-]?\d{3}[\s\.\-]?\d{4}(?:\s*x\d+)?)", text, re.IGNORECASE)
-                if m_phone: data["Phone"] = m_phone.group(1).strip()
-
-        # Total (using sample doc: "Total: $ 5,945.00" at the end)
+            # Look for Phone explicitly in the Vendor block first
+            vendor_block_text_match = re.search(r"Vendor\s*:.*?PROTOMATIC.*?Phone\s*:\s*(\(?\d{3}\)?[\s\.\-]?\d{3}[\s\.\-]?\d{4}(?:\s*x\d+)?)", text, re.IGNORECASE | re.DOTALL)
+            if vendor_block_text_match:
+                data["Phone"] = vendor_block_text_match.group(1).strip()
+            else: # Fallback to any "Phone:" not clearly buyer's
+                # Try to find a phone that is NOT the buyer's phone (952-345-2244)
+                phone_matches = re.findall(r"Phone\s*:\s*((\(?\d{3}\)?[\s\.\-]?\d{3}[\s\.\-]?\d{4}(?:\s*x\d+)?))", text, re.IGNORECASE)
+                for pm_tuple in phone_matches:
+                    pm = pm_tuple[0] # re.findall with groups returns tuples
+                    if "952-345-2244" not in pm: # Avoid buyer's phone
+                        data["Phone"] = pm.strip()
+                        break
+        
+        # Total (sample: "Total: $ 5,945.00" at the very end of page 2)
         if "Total" in fields_to_extract_labels and data["Total"] is None:
-            m = re.search(r"\b(?:Total|Amount Due)\b\s*[:\s]*([\$€£]?\s*\d{1,3}(?:,\d{3})*\.\d{2})", text, re.IGNORECASE | re.MULTILINE)
-            if m: data["Total"] = m.group(1).strip()
-            # Specific for the sample doc where "Total:" is followed by the value on the same line
-            m_sample_total = re.search(r"Total\s*:\s*(\$\s*\d{1,3}(?:,\d{3})*\.\d{2})", text, re.IGNORECASE)
-            if m_sample_total and data["Total"] is None : data["Total"] = m_sample_total.group(1).strip()
-
+            # Look for "Total:" followed by a currency amount, often at the end of the document or a section
+            m = re.search(r"Total\s*:\s*(\$\s*\d{1,3}(?:,\d{3})*\.\d{2})", text, re.IGNORECASE)
+            if m:
+                data["Total"] = m.group(1).strip()
+            else: # Broader search if ":" is missing or spacing is different
+                m_broad = re.search(r"\bTotal\b\s*([\$€£]?\s*\d{1,3}(?:,\d{3})*\.\d{2})", text, re.IGNORECASE)
+                if m_broad:
+                     # Check if what follows "Total" isn't another label like "Total Quantity"
+                    text_after_total_keyword = text[text.lower().rfind("total"):].split('\n')[0] # Get the line with "Total"
+                    if "subtotal" not in text_after_total_keyword.lower() and \
+                       "tax" not in text_after_total_keyword.lower() and \
+                       "charge" not in text_after_total_keyword.lower():
+                        data["Total"] = m_broad.group(1).strip()
+        
+        # If specific regexes fail, the generic one might have picked something up.
+        # We can try to refine the generic results or clear them if they are clearly wrong.
+        if data.get("Total") and "subtotal" in data.get("Total").lower():
+            data["Total"] = None # Clear if generic picked up "Misc. Charge Subtotal:"
 
     elif upload_type == 'ats':
-        # Using the sample resume:
-        # Sr no.: S009
-        # Name: Olivia Miller
-        # Gender: F
-        # Phone: 8788019869
-        # City: Sydney
-        # Age: 28
-        # Country: Australia
-        # Address: 42 Bondi Beach Road
-        # Email: olivia.m@example.net
-        # Skills: Shopify, Java, React, Camunda
-
+        
         if "Sr no." in fields_to_extract_labels and data["Sr no."] is None:
             m = re.search(r"Sr\s*no\.\s*:\s*(\S+)", text, re.IGNORECASE)
             if m: data["Sr no."] = m.group(1).strip()
@@ -358,114 +356,93 @@ def extract_structured_data(text, fields_to_extract_labels, upload_type=None):
             m = re.search(r"Skills\s*:\s*(.+)", text, re.IGNORECASE)
             if m: data["Skills"] = m.group(1).strip()
         if "Salary" in fields_to_extract_labels and data["Salary"] is None:
-            # Common patterns: "Salary: $50,000", "Expected Salary: 60k", "Current CTC: 12 LPA"
-            # This regex tries to capture numbers, optional k/lpa, currency symbols
-            m_salary = re.search(
-                r"(?:salary|ctc|compensation|expected salary)\s*[:\-]?\s*([\$€£₹]?\s*\d{1,3}(?:[,.]\d{3})*(?:\.\d{1,2})?\s*(?:k|lpa)?)",
-                text, re.IGNORECASE
-            )
-            if m_salary:
-                salary_str = m_salary.group(1).strip()
-                # Further cleaning/normalization can be done here if needed (e.g., convert 'k' to '000')
-                data["Salary"] = salary_str 
-            else: # Fallback: look for lines with just numbers and currency/k/lpa near salary-like words
-                for i, line in enumerate(lines):
-                    if any(keyword in line.lower() for keyword in ["salary", "ctc", "compensation"]):
-                        # Check current line and next few lines for a salary-like value
-                        for j in range(i, min(i + 3, len(lines))):
-                            potential_salary_line = lines[j]
-                            m_val = re.search(r"([\$€£₹]?\s*\d{1,3}(?:[,.]\d{3})*(?:\.\d{1,2})?\s*(?:k|lpa)?)", potential_salary_line)
-                            if m_val and len(m_val.group(1).strip()) > 2 : # Avoid matching small random numbers
-                                if not re.search(r"\d{4}", m_val.group(1)): # Avoid matching years if they look like salary
-                                    data["Salary"] = m_val.group(1).strip()
-                                    break
-                        if data["Salary"]: break
-        
-        # ADDED: Percentage Extraction
+            m_salary = re.search(r"(?:salary|ctc|compensation|expected salary)\s*[:\-]?\s*([\$€£₹]?\s*\d{1,3}(?:[,.]\d{3})*(?:\.\d{1,2})?\s*(?:k|lpa)?)", text, re.IGNORECASE)
+            if m_salary: data["Salary"] = m_salary.group(1).strip()
         if "Percentage" in fields_to_extract_labels and data["Percentage"] is None:
-            # Common patterns: "Percentage: 85%", "Score: 75.5 %", "CGPA: 8.2/10"
-            # Looks for numbers followed by '%' or 'cgpa' patterns
-            m_percent = re.search(
-                r"(?:percentage|score|marks|grade)\s*[:\-]?\s*(\d{1,2}(?:\.\d{1,2})?\s*%)", 
-                text, re.IGNORECASE
-            )
-            if m_percent:
-                data["Percentage"] = m_percent.group(1).strip()
-            else: # CGPA style
-                m_cgpa = re.search(
-                    r"(?:cgpa)\s*[:\-]?\s*(\d(?:\.\d{1,2})?(?:\s*/\s*\d{1,2})?)", 
-                    text, re.IGNORECASE
-                )
-                if m_cgpa:
-                    data["Percentage"] = m_cgpa.group(1).strip() + " CGPA" # Add context
-            # Fallback: Look for standalone percentages if the above fail
-            if data["Percentage"] is None:
-                 m_standalone_percent = re.search(r"\b(\d{1,2}(?:\.\d{1,2})?\s*%)", text)
-                 if m_standalone_percent:
-                     # Check context if possible to avoid random percentages
-                     line_containing_percent = ""
-                     for line in lines:
-                         if m_standalone_percent.group(1) in line:
-                             line_containing_percent = line.lower()
-                             break
-                     if any(kw in line_containing_percent for kw in ["aggregate", "overall", "academic", "score"]):
-                         data["Percentage"] = m_standalone_percent.group(1).strip()
-    return data
-
+            m_percent = re.search(r"(?:percentage|score|marks|grade|cgpa)\s*[:\-]?\s*(\d{1,2}(?:\.\d{1,2})?\s*%?|\d(?:\.\d{1,2})?(?:\s*/\s*\d{1,2})?)", text, re.IGNORECASE)
+            if m_percent: data["Percentage"] = m_percent.group(1).strip()
+            
+        return data
 # --- PO Database Comparison Logic ---
         
          # app.py
 
 def get_po_db_record(po_number_value_param):
+    
     if not po_number_value_param:
         return None
-    print(f"DEBUG: get_po_db_record querying for: '{po_number_value_param}'") # DEBUG
     try:
-        # Fetch from Supabase, columns are po_number, vendor, phone, total, order_date, vendor_name
+        # Fetch from Supabase. Assuming Supabase table `admin_po_database_entries`
+        # has columns: po_number (PK), vendor, phone, total, order_date
+        # These column names should match what api_add_po_data_entry saves.
         response = supabase.table('admin_po_database_entries').select(
-            "po_number, vendor, phone, total, order_date, vendor_name" # Select specific dedicated columns
-        ).eq('po_number', po_number_value_param).single().execute()
+            "po_number, vendor, phone, total, order_date" # Select specific dedicated columns
+        ).eq('po_number', str(po_number_value_param).strip()).single().execute() # Ensure po_number_value_param is string and stripped
         
         if response.data:
             db_entry_row = response.data # e.g., {'po_number': '81100', 'vendor': 'S101334', ...}
             
-            # Map DB column names back to the "Display Label" keys
+            # Map DB column names back to the "Display Label" keys used by frontend/comparison logic
             frontend_formatted_record = {
                 "PO Number": db_entry_row.get("po_number"),
-                "Vendor": db_entry_row.get("vendor"),
+                "Vendor": db_entry_row.get("vendor"), # This is Vendor ID
                 "Phone": db_entry_row.get("phone"),
                 "Total": db_entry_row.get("total"),
-                # Convert date object to string if it's not already. Supabase might return string.
                 "Order Date": str(db_entry_row.get("order_date")) if db_entry_row.get("order_date") else None,
-                "Vendor Name": db_entry_row.get("vendor_name")
             }
             return frontend_formatted_record
-        return None # PO not found
+        return None 
     except Exception as e:
-        if "No rows found" in str(e) or (hasattr(e, 'code') and e.code == 'PGRST116'): # PostgREST code for single() not finding row
+        if "No rows found" in str(e) or (hasattr(e, 'code') and e.code == 'PGRST116'):
             app.logger.info(f"PO record {po_number_value_param} not found in Supabase.")
         else:
             app.logger.error(f"Error fetching PO {po_number_value_param} from Supabase: {e}")
         return None
+    
 
 def compare_po_data(extracted_data, db_record, comparison_field_labels):
-    if not db_record: return 0, {}, "PO Record not found in database."
-    if not comparison_field_labels: return 0, {}, "No PO fields specified for comparison."
-    matched_fields = 0; mismatched = {}
-    # Ensure we only compare fields that are supposed to be in the DB record for comparison
-    actual_comparable_db_fields = [label for label in comparison_field_labels if label in db_record]
-    if not actual_comparable_db_fields: return 0, {}, "None of the comparison fields exist in the DB record."
+     if not db_record: return 0, {}, "PO Record not found in database."
+     if not comparison_field_labels: return 0, {}, "No PO fields specified for comparison."
+     matched_fields = 0
+     mismatched = {}
+     actual_comparable_db_fields = [label for label in comparison_field_labels if label in db_record]
+     if not actual_comparable_db_fields: return 0, {}, "None of comparison fields in DB record."
     
-    total_comparable = len(actual_comparable_db_fields)
-    for label in actual_comparable_db_fields:
-        db_val = str(db_record.get(label, "")).strip().lower().replace('$', '').replace(',', '')
-        ext_val = str(extracted_data.get(label, "")).strip().lower().replace('$', '').replace(',', '')
-        if ext_val == db_val and db_val != "": matched_fields += 1
-        elif db_val != "": # Only count mismatch if DB expects a value
-            mismatched[label] = {"db_value": db_record.get(label), "extracted_value": extracted_data.get(label)}
+     total_comparable = len(actual_comparable_db_fields)
+     for label in actual_comparable_db_fields:
+        db_val_orig = db_record.get(label)
+        ext_val_orig = extracted_data.get(label)
+
+        # More robust normalization for comparison
+        db_str = str(db_val_orig).strip().lower().replace('$', '').replace(',', '').replace(' ', '') if db_val_orig is not None else ""
+        ext_str = str(ext_val_orig).strip().lower().replace('$', '').replace(',', '').replace(' ', '') if ext_val_orig is not None else ""
+        
+        # Specific normalization for dates if needed:
+        if label == "Order Date":
+            # Simple attempt: if one is YYYY-MM-DD and other is M/D/YYYY, try to make them match
+            # This is basic. A proper date parsing library would be better.
+            try:
+                if re.match(r"\d{4}-\d{1,2}-\d{1,2}", db_str) and re.match(r"\d{1,2}/\d{1,2}/\d{4}", ext_str):
+                    # Convert ext_str (M/D/YYYY) to YYYY-MM-DD for comparison
+                    parts = ext_str.split('/')
+                    ext_str_reformatted = f"{parts[2]}-{int(parts[0]):02d}-{int(parts[1]):02d}"
+                    if ext_str_reformatted == db_str: ext_str = db_str # Match!
+                elif re.match(r"\d{1,2}/\d{1,2}/\d{4}", db_str) and re.match(r"\d{4}-\d{1,2}-\d{1,2}", ext_str):
+                    # Convert db_str (M/D/YYYY) to YYYY-MM-DD for comparison
+                    parts = db_str.split('/')
+                    db_str_reformatted = f"{parts[2]}-{int(parts[0]):02d}-{int(parts[1]):02d}"
+                    if db_str_reformatted == ext_str: db_str = ext_str # Match!
+            except Exception:
+                pass # Ignore parsing errors, will mismatch by default
+
+        if ext_str == db_str and db_str != "": 
+            matched_fields += 1
+        elif db_val_orig is not None: 
+            mismatched[label] = {"db_value": db_val_orig, "extracted_value": ext_val_orig}
             
-    accuracy = (matched_fields / total_comparable) * 100 if total_comparable > 0 else 0
-    return accuracy, mismatched, None
+        accuracy = (matched_fields / total_comparable) * 100 if total_comparable > 0 else 0
+        return accuracy, mismatched, None
+
 
 
 # --- ATS Data Validation Against Admin Criteria ---
@@ -1315,81 +1292,63 @@ def api_get_all_po_database_entries():
 @app.route('/api/admin/po_database_entry', methods=['POST'])
 @admin_required
 def api_add_po_data_entry():
-    form_data = request.json  # e.g., {"PO Number": "value", "Vendor": "value", ... }
-    
+    form_data = request.json
     po_number_val = form_data.get("PO Number")
     if not po_number_val or not po_number_val.strip():
-        return jsonify({"error": "PO Number is required and cannot be empty."}), 400
+        return jsonify({"error": "PO Number is required."}), 400
 
-    # Map frontend labels to database column names and prepare data for upsert
-    # Only include fields that are actually provided in the form_data
-    db_payload = {"po_number": po_number_val.strip()}
+    po_number_val = po_number_val.strip()
+    db_payload = {"po_number": po_number_val}
 
-    # Map from MASTER_FIELD_DEFINITIONS labels to DB columns if they exist in form_data
-    # Assumes DB columns are lowercase_with_underscore versions of labels or a direct mapping
-    # This mapping needs to be robust.
-    # For simplicity here, let's assume direct mapping for the known fields.
-    # You might want a more structured mapping if labels and DB columns differ significantly.
+    # Map form labels to DB column names (assuming they are lowercase and underscore for spaces)
+    # Only include fields that are actually part of MASTER_FIELD_DEFINITIONS["po"] and are submitted
+    allowed_po_labels = {f["label"]: f["id"].replace("po_doc_", "") for f in MASTER_FIELD_DEFINITIONS.get("po", [])}
     
-    # Fields from MASTER_FIELD_DEFINITIONS["po"] that the admin can configure for entry:
-    # {"id": "po_doc_number", "label": "PO Number"} -> po_number (PK, handled)
-    # {"id": "po_doc_vendor_id", "label": "Vendor"} -> vendor
-    # {"id": "po_doc_phone", "label": "Phone"}    -> phone
-    # {"id": "po_doc_total", "label": "Total"}      -> total
-    # {"id": "po_doc_order_date", "label": "Order Date"} -> order_date
-    # Let's add "Vendor Name" as it's in PO_FIELDS_FOR_USER_EXTRACTION and useful
+    for label, db_col_suffix in allowed_po_labels.items():
+        if label == "PO Number": continue # Already handled
+        if label in form_data and form_data[label] is not None and str(form_data[label]).strip():
+            # Special handling for date format if your DB column is of DATE type
+            if label == "Order Date":
+                try:
+                    # Attempt to parse M/D/YYYY or YYYY-MM-DD and store as YYYY-MM-DD
+                    date_str = str(form_data[label]).strip()
+                    parsed_date = None
+                    if re.match(r"^\d{1,2}/\d{1,2}/\d{4}$", date_str): # M/D/YYYY
+                        parts = date_str.split('/')
+                        parsed_date = f"{parts[2]}-{int(parts[0]):02d}-{int(parts[1]):02d}"
+                    elif re.match(r"^\d{4}-\d{1,2}-\d{1,2}$", date_str): # YYYY-MM-DD
+                        parsed_date = date_str
+                    
+                    if parsed_date:
+                        db_payload[db_col_suffix] = parsed_date
+                    else:
+                        # If format is unexpected but not empty, store as is if DB column is text,
+                        # or return error if DB column is strictly DATE.
+                        # For now, let's assume it might be text or we want to try storing it.
+                        # If your Supabase column for order_date is `date`, it needs 'YYYY-MM-DD'
+                        app.logger.warning(f"Order Date '{date_str}' for PO {po_number_val} has unrecognized format. Storing as is or may cause DB error if column type is strict DATE.")
+                        db_payload[db_col_suffix] = date_str # Could fail if DB column is DATE type
+                except Exception as e_date:
+                    app.logger.error(f"Error processing Order Date '{form_data[label]}' for PO {po_number_val}: {e_date}")
+                    return jsonify({"error": f"Invalid Order Date format for '{form_data[label]}'. Please use YYYY-MM-DD or MM/DD/YYYY."}), 400
+            else:
+                 db_payload[db_col_suffix] = str(form_data[label]).strip()
     
-    if "Vendor" in form_data and form_data["Vendor"].strip():
-        db_payload["vendor"] = form_data["Vendor"].strip()
-    if "Vendor Name" in form_data and form_data["Vendor Name"].strip(): # Assuming admin can configure "Vendor Name"
-        db_payload["vendor_name"] = form_data["Vendor Name"].strip()
-    if "Phone" in form_data and form_data["Phone"].strip():
-        db_payload["phone"] = form_data["Phone"].strip()
-    if "Total" in form_data and form_data["Total"].strip():
-        db_payload["total"] = form_data["Total"].strip()
-    if "Order Date" in form_data and form_data["Order Date"].strip():
-        # Ensure date is in YYYY-MM-DD for DATE column or handle conversion
-        # For simplicity, assuming frontend sends it correctly or it's text.
-        # If it's M/D/YYYY, you'd need to parse and reformat:
-        # try:
-        #     date_obj = datetime.strptime(form_data["Order Date"].strip(), '%m/%d/%Y')
-        #     db_payload["order_date"] = date_obj.strftime('%Y-%m-%d')
-        # except ValueError:
-        #     return jsonify({"error": "Invalid Order Date format. Please use MM/DD/YYYY or ensure it's correctly formatted for the database."}), 400
-        db_payload["order_date"] = form_data["Order Date"].strip() # Assuming it's YYYY-MM-DD or TEXT column handles it
-
-
-    # If it's a new entry, `created_at` and `updated_at` will be set by DB defaults.
-    # If it's an update, the trigger will handle `updated_at`.
-    # If you need to explicitly set them for an insert if no default:
-    # from datetime import datetime, timezone
-    # if not editing: # simplified logic for new entry
-    #    db_payload["created_at"] = datetime.now(timezone.utc).isoformat()
-    # db_payload["updated_at"] = datetime.now(timezone.utc).isoformat()
-
-
-    if len(db_payload) <= 1 and "po_number" in db_payload: # Only po_number was provided
+    if len(db_payload) <= 1: # Only po_number
         return jsonify({"error": "No data provided to save besides PO Number."}), 400
 
     try:
-        # Upsert: inserts if po_number doesn't exist, updates if it does.
-        # The primary key 'po_number' is used by Supabase to determine if it's an insert or update.
+        # Upsert into admin_po_database_entries table
         response = supabase.table('admin_po_database_entries').upsert(db_payload).execute()
-
         if response.data:
-            return jsonify({"message": f"PO data for '{po_number_val}' saved successfully."}), 200 # Or 201 if new
+            return jsonify({"message": f"PO data for '{po_number_val}' saved successfully."}), 200
         else:
-            # error_msg = f"Failed to save PO data for '{po_number_val}'."
-            # if hasattr(response, 'error') and response.error:
-            #     error_msg += f" DB Error: {response.error.message}"
-            # app.logger.error(f"PO upsert failed for {po_number_val} with response: {response}")
-            return jsonify({"error": "Failed to save PO data due to a database issue."}), 500
-            
+            # error_detail = "Unknown database error during PO upsert."
+            # if hasattr(response, 'error') and response.error: error_detail = response.error.message
+            return jsonify({"error": f"Failed to save PO data (Supabase)."}), 500
     except Exception as e:
-        app.logger.error(f"Exception in api_add_po_data_entry for {po_number_val}: {e}")
-        return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
-
-# app.py
+        app.logger.error(f"Exception saving PO {po_number_val} to Supabase: {e}")
+        return jsonify({"error": f"Server error saving PO: {str(e)}"}), 500
 
 @app.route('/api/admin/po_database_count', methods=['GET'])
 @admin_required
