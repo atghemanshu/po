@@ -406,8 +406,11 @@ def extract_structured_data(text, fields_to_extract_labels, upload_type=None):
             m = re.search(r"Skills\s*:\s*(.+)", text, re.IGNORECASE)
             if m: data["Skills"] = m.group(1).strip()
             
-         # Salary: (e.g., "Expected Salary: 60000", "Salary 50k", "CTC 12 LPA")
         if "Salary" in fields_to_extract_labels and data["Salary"] is None:
+            print("-" * 20)
+            print("DEBUG: Attempting Salary Extraction")
+            print(f"DEBUG: Relevant text for salary (first 500 chars of a relevant section if identifiable, or whole text if short):\n{text[:500]}") # Print relevant part of text
+            
             salary_text_candidate = None
             # Try common keywords first
             m_salary_keyword = re.search(
@@ -416,71 +419,42 @@ def extract_structured_data(text, fields_to_extract_labels, upload_type=None):
             )
             if m_salary_keyword:
                 salary_text_candidate = m_salary_keyword.group(1)
+                print(f"DEBUG: Salary Keyword Match found: '{m_salary_keyword.group(0)}', captured: '{salary_text_candidate}'")
             else:
-                # Fallback: Look for lines that primarily contain salary-like figures
-                # This is more speculative and might need refinement
-                for line in lines:
-                    # Look for a number that could be a salary, possibly with k or lpa, or currency
-                    # Try to avoid matching simple years or small numbers unless context is strong
-                    m_line_salary = re.search(r"^\s*([\$€£₹]?\s*\d{2,3}(?:[,']?\d{3})*\s*(?:k|lpa|lakhs|lacs)?)\s*$", line.strip(), re.IGNORECASE)
-                    if m_line_salary:
-                        # Basic check: does the line contain "salary" or "ctc" nearby?
-                        if "salary" in line.lower() or "ctc" in line.lower() or "compensation" in line.lower():
-                           salary_text_candidate = m_line_salary.group(1)
-                           break 
-                    # More generic number if it looks like a large amount without keywords
-                    m_large_num = re.search(r"^\s*([\$€£₹]?\s*\d{5,})\s*$", line.strip()) # e.g., at least 5 digits
-                    if m_large_num and not salary_text_candidate :
-                        salary_text_candidate = m_large_num.group(1)
-                        break
-
+                print("DEBUG: Salary Keyword Match NOT found.")
+                # ... (your fallback logic with prints) ...
 
             if salary_text_candidate:
-                salary_str_cleaned = salary_text_candidate.strip().lower()
-                # Convert k to 000, lpa/lakhs/lacs to 00000 (very basic, can be improved for "1.2 LPA")
-                salary_str_cleaned = salary_str_cleaned.replace('lpa', '00000').replace('lakhs', '00000').replace('lacs', '00000')
-                salary_str_cleaned = salary_str_cleaned.replace('k', '000')
-                
-                # Extract only digits and at most one decimal point
-                numeric_part_match = re.search(r"(\d+(?:\.\d+)?)", salary_str_cleaned)
-                if numeric_part_match:
-                    numeric_part = numeric_part_match.group(1)
-                    try:
-                        num_val = float(numeric_part)
-                        # If it's a whole number after conversion, store as int string for cleaner display
-                        data["Salary"] = str(int(num_val)) if num_val == int(num_val) else numeric_part
-                    except ValueError:
-                        data["Salary"] = numeric_part # Should be unlikely if regex matched digits/dot
-                else: # if no number found after cleaning, it wasn't a valid salary string
-                    data["Salary"] = None
+                # ... (your cleaning logic with prints) ...
+                print(f"DEBUG: Final extracted Salary: {data['Salary']}")
+            else:
+                print("DEBUG: No salary candidate found by any regex.")
+            print("-" * 20)
 
-
-        # Example for Percentage part that uses 'lines':
         if "Percentage" in fields_to_extract_labels and data["Percentage"] is None:
+            print("-" * 20)
+            print("DEBUG: Attempting Percentage Extraction")
+            print(f"DEBUG: Relevant text for percentage (first 500 chars of a relevant section if identifiable, or whole text if short):\n{text[:500]}") # Print relevant part of text
+
             percentage_val_str = None
-            m_keyword_percent = re.search(r"(?:percentage|score|marks|grade|cgpa|academic.*?score)\s*[:\-]?\s*(\d+(?:\.\d+)?)(?:\s*(?:%|percent|percentage)|(?:\s*/\s*\d+))?", text, re.IGNORECASE)
-            if m_keyword_percent: percentage_val_str = m_keyword_percent.group(1).strip()
-            
-            if percentage_val_str is None:
-                m_standalone_percent = re.search(r"\b(\d+(?:\.\d+)?)\s*(?:%|percent(?:age)?)\b", text, re.IGNORECASE)
-                if m_standalone_percent:
-                    line_containing_percent = ""
-                    for line in lines: # <<< USES 'lines' DEFINED AT THE TOP
-                        if m_standalone_percent.group(0) in line:
-                            line_containing_percent = line.lower()
-                            break
-                    if any(kw in line_containing_percent for kw in ["aggregate", "overall", "academic", "score", "marks", "grade"]):
-                        percentage_val_str = m_standalone_percent.group(1).strip()
-                    elif not line_containing_percent:
-                        percentage_val_str = m_standalone_percent.group(1).strip()
-            # ... (rest of percentage and salary logic) ...
+            # Pattern 1: Keyword followed by number
+            m_keyword_percent = re.search(
+                r"(?:percentage|score|marks|grade|cgpa|academic.*?score)\s*[:\-]?\s*(\d+(?:\.\d+)?)(?:\s*(?:%|percent|percentage)|(?:\s*/\s*\d+))?",
+                text, re.IGNORECASE
+            )
+            if m_keyword_percent:
+                percentage_val_str = m_keyword_percent.group(1).strip()
+                print(f"DEBUG: Percentage Keyword Match found: '{m_keyword_percent.group(0)}', captured: '{percentage_val_str}'")
+            else:
+                print("DEBUG: Percentage Keyword Match NOT found.")
+            # ... (your fallback logic with prints) ...
+
             if percentage_val_str:
-                cleaned_percentage = re.sub(r"[^0-9.]", "", percentage_val_str)
-                if cleaned_percentage:
-                    try:
-                        num_val = float(cleaned_percentage)
-                        data["Percentage"] = str(int(num_val)) if num_val == int(num_val) else cleaned_percentage
-                    except ValueError: data["Percentage"] = cleaned_percentage
+                # ... (your cleaning logic with prints) ...
+                print(f"DEBUG: Final extracted Percentage: {data['Percentage']}")
+            else:
+                print("DEBUG: No percentage candidate found by any regex.")
+            print("-" * 20)
 
         
         print(f"DEBUG ATS Extracted data: {data}")

@@ -547,7 +547,7 @@ document.addEventListener('DOMContentLoaded', () => {
         userTableBody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-3"><div class="spinner-border spinner-border-sm me-1"></div>Loading users...</td></tr>';
         if(noUsersMessage) noUsersMessage.style.display = 'none';
         try {
-            const response = await fetch('/api/admin/manage_users');
+            const response = await fetch('/api/admin/manage_users',{ credentials: 'same-origin' });
             if (!response.ok) throw new Error(`HTTP error ${response.status}`);
             const users = await response.json();
             userTableBody.innerHTML = '';
@@ -867,7 +867,7 @@ document.addEventListener('DOMContentLoaded', () => {
             let url = '/api/admin/ats_criteria';
             let method = 'POST';
             if (editingCriterionId && atsCriterionIdInput.value) { // If editing
-                url = `/api/admin/ats_criteria/${encodeURIComponent(fieldLabel)}/${encodeURIComponent(atsCriterionIdInput.value)}`;
+                url = `/api/admin/ats_criteria/${encodeURIComponent(atsCriterionIdInput.value)}`;
                 method = 'PUT';
                 payload.id = atsCriterionIdInput.value; // Send ID for matching, though backend uses URL
             }
@@ -927,7 +927,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (confirm(`Delete criterion for field "${fieldLabel}"?`)) {
                     toggleButtonSpinner(deleteBtn, true);
                     try {
-                        const response = await fetch(`/api/admin/ats_criteria/${encodeURIComponent(fieldLabel)}/${encodeURIComponent(criterionId)}`, {method: 'DELETE',credentials: 'same-origin'});
+                        const response = await fetch(`/api/admin/ats_criteria/${encodeURIComponent(criterionId)}`, {method: 'DELETE',credentials: 'same-origin'});
                         const result = await response.json();
                         if (!response.ok) throw new Error(result.error || "Delete failed.");
                         loadATSCriteria(); showFlashMessage(result.message, 'success');
