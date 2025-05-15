@@ -324,29 +324,148 @@ def extract_structured_data(text, fields_to_extract_labels, upload_type=None):
         return data
 
     elif upload_type == 'ats':
-        # ... (Your existing ATS extraction logic) ...
-        # Make sure to test this thoroughly as well
+       
+    # Sr no.: S009
         if "Sr no." in fields_to_extract_labels and data["Sr no."] is None:
             m = re.search(r"Sr\s*no\.\s*:\s*(\S+)", text, re.IGNORECASE)
             if m: data["Sr no."] = m.group(1).strip()
+        
+        # Name: Olivia Miller
         if "Name" in fields_to_extract_labels and data["Name"] is None:
-            m = re.search(r"Name\s*:\s*(.+)", text, re.IGNORECASE)
+            m = re.search(r"Name\s*:\s*(.+)", text, re.IGNORECASE) # Captures rest of the line
             if m: data["Name"] = m.group(1).strip()
-        # ... (add all your other ATS field regexes here) ...
+        
+        # Gender: F
+        if "Gender" in fields_to_extract_labels and data["Gender"] is None:
+            m = re.search(r"Gender\s*:\s*([A-Za-z]+)", text, re.IGNORECASE)
+            if m: data["Gender"] = m.group(1).strip().upper() # Standardize case
+
+        # Phone: 8788019869
+        if "Phone" in fields_to_extract_labels and data["Phone"] is None:
+            # Look for "Phone:" followed by digits, allowing spaces, hyphens, parentheses
+            m = re.search(r"Phone\s*:\s*([\d\s\-\(\)]+)", text, re.IGNORECASE)
+            if m:
+                phone_str = m.group(1).strip()
+                data["Phone"] = re.sub(r"[^\d]", "", phone_str) # Clean to just digits
+
+        # City: Sydney
+        if "City" in fields_to_extract_labels and data["City"] is None:
+            m = re.search(r"City\s*:\s*(.+)", text, re.IGNORECASE)
+            if m: data["City"] = m.group(1).strip()
+
+        # Age: 28
+        if "Age" in fields_to_extract_labels and data["Age"] is None:
+            m = re.search(r"Age\s*:\s*(\d+)", text, re.IGNORECASE)
+            if m: data["Age"] = m.group(1).strip()
+
+        # Country: Australia
+        if "Country" in fields_to_extract_labels and data["Country"] is None:
+            m = re.search(r"Country\s*:\s*(.+)", text, re.IGNORECASE)
+            if m: data["Country"] = m.group(1).strip()
+
+        # Address: 42 Bondi Beach Road
+        if "Address" in fields_to_extract_labels and data["Address"] is None:
+            m = re.search(r"Address\s*:\s*(.+)", text, re.IGNORECASE)
+            if m: data["Address"] = m.group(1).strip()
+        
+        # Email: olivia.m@example.net
+        if "Email" in fields_to_extract_labels and data["Email"] is None:
+            m = re.search(r"Email\s*:\s*([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})", text, re.IGNORECASE)
+            if m: data["Email"] = m.group(1).strip()
+
+        # Skills: Shopify, Java, React, Camunda
         if "Skills" in fields_to_extract_labels and data["Skills"] is None:
             m = re.search(r"Skills\s*:\s*(.+)", text, re.IGNORECASE)
             if m: data["Skills"] = m.group(1).strip()
+            
+        # Salary: (e.g., "Expected Salary: 60000", "Salary 50k", "CTC 12 LPA")
         if "Salary" in fields_to_extract_labels and data["Salary"] is None:
-            m_salary = re.search(r"(?:salary|ctc|compensation|expected salary)\s*[:\-]?\s*([\$€£₹]?\s*\d{1,3}(?:[,.]\d{3})*(?:\.\d{1,2})?\s*(?:k|lpa)?)", text, re.IGNORECASE)
-            if m_salary: data["Salary"] = m_salary.group(1).strip()
-        if "Percentage" in fields_to_extract_labels and data["Percentage"] is None:
-            m_percent = re.search(r"(?:percentage|score|marks|grade|cgpa)\s*[:\-]?\s*(\d{1,2}(?:\.\d{1,2})?\s*%?|\d(?:\.\d{1,2})?(?:\s*/\s*\d{1,2})?)", text, re.IGNORECASE)
-            if m_percent: data["Percentage"] = m_percent.group(1).strip()
+            # This regex attempts to find keywords followed by numbers, possibly with k, lpa, or currency symbols
+            m_salary = re.search(
+                r"(?:salary|ctc|compensation|expected\s*salary)\s*[:\-]?\s*([\$€£₹]?\s*\d[\d,\.]*\s*(?:k|lpa)?)",
+                text, re.IGNORECASE
+            )
+            if m_salary:
+                salary_str = m_salary.group(1).strip().lower()
+                # Extract only the numeric part
+                numeric_part = re.sub(r'[^\d\.]', '', salary_str.replace('k', '000').replace('lpa', '00000')) # Basic conversion
+                if numeric_part:
+                    try:
+                        # Attempt to convert to float then int if it's a whole number for cleaner output
+                        num_val = float(numeric_part)
+                        data["Salary"] = str(int(num_val)) if num_val.is_integer() else numeric_part
+                    except ValueError:
+                        data["Salary"] = numeric_part # Keep as string if conversion fails (e.g. multiple dots)
+            else: # Fallback: Look for a line that looks like a salary figure if no direct label
+                salary_pattern_line = re.search(r"^\s*([\$€£₹]?\s*\d[\d,\.]*\s*(?:k|lpa)?)\s*$", text, re.MULTILINE | re.IGNORECASE)
+                if salary_pattern_line:
+                    salary_str = salary_pattern_line.group(1).strip().lower()
+                    numeric_part = re.sub(r'[^\d\.]', '', salary_str.replace('k', '000').replace('lpa', '00000'))
+                    if numeric_part:
+                        try:
+                            num_val = float(numeric_part)
+                            data["Salary"] = str(int(num_val)) if num_val.is_integer() else numeric_part
+                        except ValueError:
+                            data["Salary"] = numeric_part
 
-        # app.logger.debug(f"ATS Extracted data: {data}")
+             # Percentage: (e.g., "Percentage: 85%", "Score: 75.5 %", "CGPA: 8.2/10", "80%")
+        if "Percentage" in fields_to_extract_labels and data["Percentage"] is None:
+            percentage_val = None
+            # Pattern 1: Keyword followed by number, optionally with % or /10 (for CGPA)
+            m_keyword_percent = re.search(
+                r"(?:percentage|score|marks|grade|cgpa)\s*[:\-]?\s*(\d+(?:\.\d+)?)(?:\s*(?:%|percent|percentage)|(?:\s*/\s*\d+))?",
+                text, re.IGNORECASE
+            )
+            if m_keyword_percent:
+                percentage_val = m_keyword_percent.group(1).strip()
+            
+            # Pattern 2: Standalone number followed by '%' or 'percent' or 'percentage'
+            if percentage_val is None: # Only if not found by keyword
+                m_standalone_percent = re.search(
+                    r"\b(\d+(?:\.\d+)?)\s*(?:%|percent|percentage)\b", 
+                    text, re.IGNORECASE
+                )
+                if m_standalone_percent:
+                    # Check context to avoid random numbers if possible
+                    line_containing_percent = ""
+                    for line in lines: # 'lines' should be defined at the start of extract_structured_data
+                        if m_standalone_percent.group(0) in line: # Check if the whole match is in the line
+                            line_containing_percent = line.lower()
+                            break
+                    if any(kw in line_containing_percent for kw in ["aggregate", "overall", "academic", "score", "marks", "grade"]):
+                        percentage_val = m_standalone_percent.group(1).strip()
+                    elif not line_containing_percent: # If it was a general match not tied to a line with keywords
+                        percentage_val = m_standalone_percent.group(1).strip()
+
+
+            # Pattern 3: Number that looks like CGPA (e.g., 8.2, 7.5/10) if previous patterns failed
+            if percentage_val is None:
+                m_cgpa_like = re.search(
+                    r"\b(\d\.\d{1,2}(?:\s*/\s*10)?)\b", # Matches X.YY or X.YY/10
+                    text
+                )
+                if m_cgpa_like:
+                    cgpa_candidate = m_cgpa_like.group(1).strip()
+                    # Check context to see if it's likely a CGPA
+                    line_containing_cgpa = ""
+                    for line in lines:
+                        if cgpa_candidate in line:
+                            line_containing_cgpa = line.lower()
+                            break
+                    if "cgpa" in line_containing_cgpa or "grade point average" in line_containing_cgpa:
+                        # Extract just the number before /10 if present
+                        percentage_val = cgpa_candidate.split('/')[0].strip()
+            
+            if percentage_val:
+                # Clean up: remove any trailing non-numeric if accidentally captured by a broader regex part (though current regexes try to avoid this)
+                # Ensure we only have digits and a potential decimal point.
+                cleaned_percentage = re.sub(r"[^0-9.]", "", percentage_val)
+                if cleaned_percentage:
+                    data["Percentage"] = cleaned_percentage 
+             # app.logger.debug(f"ATS Extracted data: {data}")
         print(f"DEBUG ATS Extracted data: {data}")
         return data
-
+    
     # --- Fallback Generic Key-Value Extraction (apply this only if specific type logic didn't fill everything) ---
     # This part should run *after* the PO/ATS specific logic if you want to fill remaining Nones
     # Be cautious as it can be overly greedy.
