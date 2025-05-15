@@ -72,7 +72,7 @@ MASTER_FIELD_DEFINITIONS = {
         {"id": "ats_skills", "label": "Skills", "description": "Comma-separated or list of skills (e.g., Shopify, Java, React)"},
         {"id": "ats_salary", "label": "Salary", "description": "Expected or Current Salary (numeric part)"},
         {"id": "ats_percentage", "label": "Percentage", "description": "Relevant Percentage/Score (e.g., academic)"},
-        {"id": "ats_experience_years", "label": "Experience (Years)", "description": "Total years of professional experience"},
+        # {"id": "ats_experience_years", "label": "Experience (Years)", "description": "Total years of professional experience"},
     ]
 }
 
@@ -524,7 +524,6 @@ def get_po_db_record(po_number_value_param):
                 "Phone": db_entry_row.get("phone"),
                 "Total": db_entry_row.get("total"),
                 "Order Date": display_order_date, # Use formatted date
-                "Vendor Name": db_entry_row.get("vendor_name") # If you added this column
             }
             return frontend_formatted_record
         return None 
@@ -1444,7 +1443,6 @@ def api_get_all_po_database_entries():
                     "Phone": entry_from_db.get("phone"),
                     "Total": entry_from_db.get("total"),
                     "Order Date": str(entry_from_db.get("order_date")) if entry_from_db.get("order_date") else None, # Convert date to string
-                    "Vendor Name": entry_from_db.get("vendor_name")
                     # Add any other fields that your admin_dashboard.html existing PO table might try to display
                 }
                 # Filter out None values if you don't want them in the JSON response for fields not set
@@ -1476,33 +1474,19 @@ def api_get_all_po_database_entries():
 @app.route('/api/admin/po_database_entry', methods=['POST'])
 @admin_required
 def api_add_po_data_entry():
-    form_data = request.json # This comes from the admin panel JS, keys are "PO Number", "Vendor", "Phone", etc.
+    form_data = request.json 
     po_number_val = form_data.get("PO Number")
     if not po_number_val or not po_number_val.strip():
         return jsonify({"error": "PO Number is required."}), 400
 
     po_number_val = po_number_val.strip()
-    
-    # This will be the payload sent to Supabase, keys must match DB column names
     db_payload_for_supabase = {"po_number": po_number_val}
 
-    # Iterate through the labels defined in MASTER_FIELD_DEFINITIONS for PO
-    # These labels are what your admin_dashboard.html form uses as input field names
     for field_def in MASTER_FIELD_DEFINITIONS.get("po", []):
-        label = field_def["label"] # e.g., "Vendor", "Phone", "Total", "Order Date"
-        
-        # Determine the corresponding database column name
-        # Based on your DB schema, it's the lowercase label (with space possibly to underscore, but your schema uses just lowercase)
-        # For "PO Number", it's "po_number" (already handled)
-        # For "Vendor", it's "vendor"
-        # For "Phone", it's "phone"
-        # For "Total", it's "total"
-        # For "Order Date", it's "order_date"
-        # (If you add "Vendor Name" to MASTER_FIELD_DEFINITIONS and your DB, it would be "vendor_name")
-
+        label = field_def["label"] 
         db_column_name = None
         if label == "PO Number":
-            continue # Already set as po_number in db_payload_for_supabase
+            continue 
         elif label == "Vendor":
             db_column_name = "vendor"
         elif label == "Phone":
@@ -1511,65 +1495,79 @@ def api_add_po_data_entry():
             db_column_name = "total"
         elif label == "Order Date":
             db_column_name = "order_date"
-        # Add elif for "Vendor Name" -> "vendor_name" if you include it
-        # elif label == "Vendor Name":
-        #     db_column_name = "vendor_name"
+        # Add other mappings here if you have more, e.g.:
+        # elif label == "Vendor Name": 
+        #     db_column_name = "vendor_name" # Assuming you have a 'vendor_name' column
 
-        if db_column_name and label in form_data and form_data[label] is not None:
-            value_to_store = str(form_data[label]).strip()
-            if value_to_store: # Only add if there's a non-empty value
-               if db_column_name == "order_date":
-                try:
-                    date_str = value_to_store # value_to_store is form_data[label].strip()
-                    parsed_date_for_db = None
-                    # Try M/D/YYYY (e.g., 8/8/2024)
-                    if re.match(r"^\d{1,2}/\d{1,2}/\d{4}$", date_str):
-                        month, day, year = map(int, date_str.split('/'))
-                        parsed_date_for_db = f"{year:04d}-{month:02d}-{day:02d}"
-                    # Try YYYY-MM-DD (e.g., 2024-08-08) - already good
-                    elif re.match(r"^\d{4}-\d{1,2}-\d{1,2}$", date_str):
-                        year, month_str, day_str = date_str.split('-') # ensure parts are correctly formatted
-                        parsed_date_for_db = f"{int(year):04d}-{int(month_str):02d}-{int(day_str):02d}"
-                    
-                    if parsed_date_for_db:
-                        db_payload_for_supabase[db_column_name] = parsed_date_for_db
+        # Ensure you have a db_column_name before proceeding for this label
+        if not db_column_name:
+            continue # Skip if this label from MASTER_FIELD_DEFINITIONS isn't mapped to a DB column
+
+        # Check if the label (form field name) is present in the submitted form_data
+        if label in form_data:
+            submitted_value = form_data[label]
+
+            if submitted_value is not None:
+                value_to_store_str = str(submitted_value).strip()
+
+                if db_column_name == "order_date":
+                    if not value_to_store_str: # If admin submitted an empty string for date
+                        db_payload_for_supabase[db_column_name] = None # Store as NULL
                     else:
-                        # If format is totally unexpected, and DB column is DATE, this will cause an error.
-                        # It's better to reject it here.
-                        app.logger.warning(f"Order Date '{date_str}' for PO {po_number_val} has unrecognized format. Not saving this field or returning error.")
-                        # Option 1: Don't include this field in db_payload_for_supabase
-                        # Option 2: Return an error to the admin
-                        return jsonify({"error": f"Invalid Order Date format: '{date_str}'. Please use MM/DD/YYYY or YYYY-MM-DD."}), 400
-                except ValueError: # Handles errors from int() conversion
-                     app.logger.error(f"Invalid date value for Order Date: {date_str}")
-                     return jsonify({"error": f"Invalid date format for Order Date: '{date_str}'. Use MM/DD/YYYY or YYYY-MM-DD."}), 400
-            else:
-                db_payload_for_supabase[db_column_name] = value_to_store
+                        try:
+                            parsed_date_for_db = None
+                            if re.match(r"^\d{1,2}/\d{1,2}/\d{4}$", value_to_store_str):
+                                month, day, year = map(int, value_to_store_str.split('/'))
+                                parsed_date_for_db = f"{year:04d}-{month:02d}-{day:02d}"
+                            elif re.match(r"^\d{4}-\d{1,2}-\d{1,2}$", value_to_store_str):
+                                year, month_str, day_str = value_to_store_str.split('-')
+                                parsed_date_for_db = f"{int(year):04d}-{int(month_str):02d}-{int(day_str):02d}"
+                            
+                            if parsed_date_for_db:
+                                db_payload_for_supabase[db_column_name] = parsed_date_for_db
+                            else:
+                                app.logger.warning(f"Order Date '{value_to_store_str}' for PO {po_number_val} has unrecognized format.")
+                                return jsonify({"error": f"Invalid Order Date format: '{value_to_store_str}'. Use MM/DD/YYYY or YYYY-MM-DD."}), 400
+                        except ValueError:
+                             app.logger.error(f"Invalid date value for Order Date: {value_to_store_str}")
+                             return jsonify({"error": f"Invalid date format for Order Date: '{value_to_store_str}'. Use MM/DD/YYYY or YYYY-MM-DD."}), 400
+                else: # For non-date fields (Vendor, Phone, Total, Vendor Name etc.)
+                    if value_to_store_str == "":
+                        db_payload_for_supabase[db_column_name] = None # Store empty string as NULL
+                    else:
+                        db_payload_for_supabase[db_column_name] = value_to_store_str
+            else: # If form_data[label] is explicitly null (e.g., from JSON "Vendor": null)
+                db_payload_for_supabase[db_column_name] = None # Store as NULL
+        # else:
+            # If label is NOT in form_data (meaning admin didn't configure this field for entry, so it wasn't on the form),
+            # we simply don't add this key to db_payload_for_supabase.
+            # Supabase upsert will then leave the existing value in that DB column unchanged, or set its DB default if it's a new row.
+            # Since your other columns (vendor, phone, total) default to NULL in the DB, this behavior is fine.
+
     
-    if len(db_payload_for_supabase) <= 1 and "po_number" in db_payload_for_supabase: # Only po_number
+
+
+    if len(db_payload_for_supabase) <= 1 and "po_number" in db_payload_for_supabase:
         return jsonify({"error": "No data provided to save besides PO Number."}), 400
 
     try:
         app.logger.info(f"Upserting PO data to Supabase: {db_payload_for_supabase}")
         response = supabase.table('admin_po_database_entries').upsert(db_payload_for_supabase).execute()
         
-        # Supabase upsert often returns data in response.data if successful
         if response.data:
-            app.logger.info(f"Supabase PO upsert successful: {response.data}")
+            app.logger.info(f"Supabase PO upsert successful for {po_number_val}")
             return jsonify({"message": f"PO data for '{po_number_val}' saved successfully."}), 200
         elif hasattr(response, 'error') and response.error:
             app.logger.error(f"Supabase error saving PO {po_number_val}: code={response.error.code}, message={response.error.message}, details={response.error.details}, hint={response.error.hint}")
             return jsonify({"error": f"Database error: {response.error.message} (Code: {response.error.code})"}), 500
         else:
-            # Handle cases where there's no data and no explicit error object (less common but possible)
             app.logger.error(f"Supabase PO upsert for {po_number_val} returned no data and no explicit error. Status: {getattr(response, 'status_code', 'N/A')}")
             return jsonify({"error": "Failed to save PO data (Supabase - unexpected response)."}), 500
             
     except Exception as e:
         app.logger.error(f"Exception saving PO {po_number_val} to Supabase: {type(e).__name__} - {e}", exc_info=True)
-        return jsonify({"error": f"Server error saving PO: {str(e)}"}), 500
-    
-# app.py
+        return jsonify({"error": f"Server error saving PO: {str(e)}"}), 500 
+
 
 @app.route('/api/admin/po_database_count', methods=['GET'])
 @admin_required
