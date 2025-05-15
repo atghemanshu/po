@@ -133,97 +133,127 @@
                                 <a href="{{ url_for('download_report', doc_type='po', filename_key=filename) }}" class="btn btn-sm btn-outline-secondary" target="_blank"><i class="bi bi-download me-1"></i>Download Report</a>
                                 {% endif %}
                             </h4>
+
                             {% if res_data.error %}
                                 <p class="error-message"><i class="fas fa-exclamation-triangle me-1"></i>{{ res_data.error }}</p>
-                            {% else %}
+                            {% else %} {# No processing error, proceed to display results #}
                                 <div class="mb-3"><h5><i class="fas fa-align-left me-1"></i>Extracted Text:</h5><pre>{{ res_data.extracted_text | default('N/A', true) }}</pre></div>
+                                
                                 <div class="row">
                                     <div class="col-md-6 mb-3">
-                                                <h5><i class="fas fa-project-diagram me-1"></i>Extracted Data:</h5>
-                                                <div class="data-display-box">
-                                                    {% if res_data.structured_data and res_data.structured_data|length > 0 %}
-                                                        <dl>
-                                                        {% for field_label in PO_FIELDS_FOR_USER_EXTRACTION %}
-                                                            {% if field_label in res_data.structured_data %}
-                                                            <dt>{{ field_label }}:</dt>
-                                                            <dd>{{ res_data.structured_data[field_label] | default('N/A', true) }}</dd>
-                                                            {% endif %}
-                                                        {% endfor %}
-                                                        </dl>
-                                                    {% else %}
-                                                        <p class="text-muted">No structured data extracted or available for display.</p>
+                                        <h5><i class="fas fa-project-diagram me-1"></i>Extracted Data:</h5>
+                                        <div class="data-display-box">
+                                            {% if res_data.structured_data and res_data.structured_data|length > 0 %}
+                                                <dl>
+                                                {% for field_label in PO_FIELDS_FOR_USER_EXTRACTION %}
+                                                    {% if field_label in res_data.structured_data and res_data.structured_data[field_label] is not none %}
+                                                    <dt>{{ field_label }}:</dt>
+                                                    <dd>{{ res_data.structured_data[field_label] }}</dd>
+                                                    {% elif field_label in res_data.structured_data and res_data.structured_data[field_label] is none %}
+                                                    <dt>{{ field_label }}:</dt>
+                                                    <dd><span class="text-mutedfst-italic">(empty/not found)</span></dd>
                                                     {% endif %}
-                                                </div>
-                                     </div>
+                                                {% endfor %}
+                                                </dl>
+                                            {% else %}
+                                                <p class="text-muted">No structured data extracted.</p>
+                                            {% endif %}
+                                        </div>
+                                    </div>
 
-                                            {# Database Data (Comparison) - This is empty in your screenshot #}
                                     <div class="col-md-6 mb-3">
-                                                <h5><i class="fas fa-database me-1"></i>Database Data (Comparison):</h5>
-                                                <div class="data-display-box">
-                                                    {# This condition needs res_data.db_record_for_display to be populated #}
-                                                    {% if res_data.db_record_for_display and res_data.db_record_for_display|length > 0 %}
-                                                        <dl>
-                                                        {% for field, value in res_data.db_record_for_display.items() %}
-                                                            <dt>{{ field }}:</dt>
-                                                            <dd>{{ value | default('N/A', true) }}</dd>
-                                                        {% endfor %}
-                                                        </dl>
-                                                    {# If comparison_error indicates PO not found, show that #}
-                                                    {% elif res_data.comparison_error and "not found in database" in res_data.comparison_error|string|lower %}
-                                                        <p class="text-muted">{{ res_data.comparison_error }}</p>
-                                                    {# If PO Number wasn't extracted, nothing to compare against #}
-                                                    {% elif res_data.comparison_error and "not extracted" in res_data.comparison_error|string|lower %}
-                                                        <p class="text-muted">{{ res_data.comparison_error }}</p>
-                                                    {% else %}
-                                                        <p class="text-muted">No database record to compare or comparison not applicable.</p>
-                                                    {% endif %}
-                                                </div>
-                                     </div>
-                                
-                                 </div>
-                                </div>
-                              {% if 'accuracy' in res_data %} {# This key MUST exist in res_data #}
-                                <h5 class="mt-3"><i class="fas fa-check-double me-1"></i>PO Comparison & Accuracy:</h5>
+                                        <h5><i class="fas fa-database me-1"></i>Database Data (For Comparison):</h5>
+                                        <div class="data-display-box">
+                                            {% if res_data.db_record_for_display and res_data.db_record_for_display|length > 0 %}
+                                                <dl>
+                                                {% for field, value in res_data.db_record_for_display.items() %}
+                                                    <dt>{{ field }}:</dt>
+                                                    <dd>{{ value | default('N/A', true) }}</dd>
+                                                {% endfor %}
+                                                </dl>
+                                            {% elif res_data.comparison_error and ("not found in database" in res_data.comparison_error|string|lower or "not extracted" in res_data.comparison_error|string|lower) %}
+                                                <p class="text-muted">{{ res_data.comparison_error }}</p>
+                                            {% else %}
+                                                <p class="text-muted">No database record to compare against for this PO.</p>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                </div> {# End of row for Extracted and DB data #}
+
+                                {# PO Comparison & Accuracy Section #}
+                                {% if 'accuracy' in res_data and res_data.db_record_for_display %} {# Only show if comparison was possible #}
+                                <h5 class="mt-4 pt-3 border-top"><i class="fas fa-check-double me-1"></i>PO Comparison & Accuracy:</h5>
                                 <div class="data-display-box">
-                                    {# Only show error if it's a comparison logic error, not "PO not found" which is handled above #}
+                                    {# Display comparison error if it exists and isn't just about PO not found #}
                                     {% if res_data.comparison_error and "not found" not in res_data.comparison_error|string|lower and "not extracted" not in res_data.comparison_error|string|lower %}
-                                        <p class="error-message">{{ res_data.comparison_error }}</p>
-                                    {% elif res_data.db_record_for_display %} {# Only show accuracy if there was a DB record to compare with #}
-                                        <p>Accuracy {% if res_data.compared_fields_list %}(based on: {{ res_data.compared_fields_list|join(', ') }}){% endif %}: 
+                                        <p class="text-danger"><i class="fas fa-exclamation-circle me-1"></i>{{ res_data.comparison_error }}</p>
+                                    {% endif %}
+
+                                    {# Accuracy Chart and Textual Summary for PO #}
+                                    {% if res_data.acc_calc_val is defined %}
+                                    <div style="display: flex; align-items: center; justify-content: center; flex-direction: column; margin-top: 10px; margin-bottom: 15px;">
+                                        <div class="accuracy-circle-chart" data-target-accuracy="{{ res_data.acc_calc_val }}">
+                                            <svg viewBox="0 0 100 100">
+                                                <circle class="accuracy-circle-bg" cx="50" cy="50" r="{{ res_data.chart_radius }}"
+                                                    stroke-width="{{ res_data.chart_stroke_width }}"></circle>
+                                                <circle class="accuracy-circle-fg" cx="50" cy="50" r="{{ res_data.chart_radius }}"
+                                                    stroke="{{ res_data.chart_color }}" stroke-width="{{ res_data.chart_stroke_width }}"
+                                                    stroke-dasharray="{{ res_data.chart_circumference }}"
+                                                    style=`stroke-dashoffset: {{ res_data.chart_circumference }};`
+                                                    data-target-offset="{{ res_data.chart_offset }}"></circle>
+                                                <text x="50" y="50" class="accuracy-circle-text" transform="rotate(90 50 50)"
+                                                    style=`fill: {{ res_data.chart_color }};`>0.0%</text>
+                                            </svg>
+                                        </div>
+                                        <p class="mt-2 mb-0 text-center">
+                                            Accuracy {% if res_data.compared_fields_list %}(based on: {{ res_data.compared_fields_list|join(', ') }}){% endif %}: 
+                                            <span class="{{ res_data.chart_text_class }}">
+                                                {{ res_data.chart_description }} ({{ res_data.acc_display_val }}%)
+                                            </span>
+                                        </p>
+                                    </div>
+                                    {% else %} 
+                                        {# Fallback textual accuracy if chart data not available #}
+                                        <p class="mt-3">Accuracy {% if res_data.compared_fields_list %}(based on: {{ res_data.compared_fields_list|join(', ') }}){% endif %}: 
                                             {% set acc = res_data.accuracy %}
                                             {% if acc >= 99.9 %}<span class="accuracy-good">Excellent ({{ "%.1f"|format(acc) }}%)</span>
                                             {% elif acc >= 80 %}<span class="accuracy-good">Good ({{ "%.1f"|format(acc) }}%)</span>
                                             {% elif acc >= 60 %}<span class="accuracy-moderate">Moderate ({{ "%.1f"|format(acc) }}%)</span>
                                             {% else %}<span class="accuracy-bad">Low ({{ "%.1f"|format(acc) }}%)</span>{% endif %}
                                         </p>
-                                        {% if res_data.mismatched_fields and res_data.mismatched_fields|length > 0 %}
-                                            <h6 class="mt-2">Mismatched Fields:</h6>
-                                            <table class="mismatch-table">
-                                                <thead><tr><th>Field</th><th>Extracted Value</th><th>Database Value</th></tr></thead>
-                                                <tbody>
-                                                {% for field, mismatch in res_data.mismatched_fields.items() %}
-                                                <tr><td>{{ field }}</td><td>{{ mismatch.extracted_value | default('(empty)', true) }}</td><td>{{ mismatch.db_value | default('(empty)', true) }}</td></tr>
-                                                {% endfor %}
-                                                </tbody>
-                                            </table>
-                                        {% elif res_data.accuracy >= 99.9 %}
-                                            <p class="text-success"><i class="fas fa-thumbs-up me-1"></i>All compared fields matched!</p>
-                                        {% else %}
-                                            <p class="text-muted">No mismatches found in compared fields (but accuracy not 100%).</p>
-                                        {% endif %}
-                                    {% elif not res_data.comparison_error %} 
-                                        {# If no DB record for display and no specific comparison error, it means PO wasn't found or extracted #}
-                                        {# This case is usually covered by the comparison_error messages displayed in the "Database Data" box #}
-                                        {# Or, if PO was extracted but not found in DB, the "Database Data" box shows the message. #}
-                                        {# So this section might not show anything if comparison couldn't proceed, which is fine. #}
+                                    {% endif %}
+                                    
+                                    {# Mismatched Fields Table #}
+                                    {% if res_data.mismatched_fields and res_data.mismatched_fields|length > 0 %}
+                                        <h6 class="mt-3">Mismatched Fields:</h6>
+                                        <table class="mismatch-table">
+                                            <thead><tr><th>Field</th><th>Extracted Value</th><th>Database Value</th></tr></thead>
+                                            <tbody>
+                                            {% for field, mismatch in res_data.mismatched_fields.items() %}
+                                            <tr>
+                                                <td>{{ field }}</td>
+                                                <td>{{ mismatch.extracted_value | default('(empty/not extracted)', true) }}</td>
+                                                <td>{{ mismatch.db_value | default('(N/A in DB or empty)', true) }}</td>
+                                            </tr>
+                                            {% endfor %}
+                                            </tbody>
+                                        </table>
+                                    {% elif res_data.accuracy >= 99.9 %} {# If 100% accurate, no mismatches #}
+                                        <p class="text-success mt-3"><i class="fas fa-thumbs-up me-1"></i>All compared fields matched!</p>
+                                    {% else %} {# Accuracy < 100% but no specific mismatches listed (could be due to empty fields) #}
+                                        <p class="text-muted mt-3">No specific field value mismatches found (accuracy may be affected by empty fields).</p>
                                     {% endif %}
                                 </div>
-                                {% endif %}
-                            {% endif %} {# end error check #}
-                        </div> {# end result-container #}
+                                {% elif res_data.comparison_error %} {# If comparison couldn't happen due to error like PO not found #}
+                                     <p class="text-muted mt-3">{{ res_data.comparison_error }}</p>
+                                {% else %}
+                                    <p class="text-muted mt-3">Comparison data not available.</p>
+                                {% endif %} {# End of 'accuracy' in res_data and res_data.db_record_for_display #}
+                            {% endif %} {# End of no res_data.error #}
+                        </div> {# End result-container #}
                         {% endfor %}
                     {% elif request.method == 'POST' and active_tab_id == 'po' %}
-                         <div class="alert alert-info mt-3">Processing complete. If files were uploaded, results will appear above.</div>
+                         <div class="alert alert-info mt-3">Processing complete. If files were uploaded and processed, results will appear above.</div>
                     {% endif %}
                     {% endif %} {# End PO Tab specific content #}
 
