@@ -1,61 +1,15 @@
-# render.yaml
-
 services:
-  - type: web # Or 'pserv' if it's a private worker service, but 'web' is common for Flask apps
-    name: po # REPLACE with your actual Render service name (e.g., "my-flask-app", "po-ats-processor")
-    env: python # Specifies the Python native environment
-    # region: oregon # Optional: specify your preferred region, e.g., oregon, frankfurt, singapore
-    plan: free # Or your chosen plan (free, starter, etc.)
-    
-    # Specify the Python version Render should use. 
-    # Match this with the Python version your local venv uses for best compatibility (e.g., 3.11, 3.12).
-    # Render's build log showed it used 3.11.11 by default, which is good.
-    pythonVersion: "3.11" # Or "3.12" etc. Check Render docs for supported versions.
-
-    # System packages to install using apt-get before your buildCommand runs
-    # This section is crucial for installing LibreOffice
-    systemPackages: # This key might be 'buildSystemPackages' or 'aptPackages' on older Render specs,
-                    # but 'systemPackages' is common for newer native environments.
-                    # **DOUBLE-CHECK Render's current documentation for the correct key if this fails.**
-      - name: libreoffice-writer # Provides 'soffice' for writer documents like DOCX
-      - name: libreoffice-common # Common files for LibreOffice suite
-      # - name: fonts-liberation # Optional: Good default fonts, helps with rendering fidelity
-      # - name: uno-libs-private # Sometimes needed as a dependency on some systems
-      # - name: ure # Sometimes needed as a dependency on some systems
-
-    # Your build command - installs Python dependencies
-    # It's good practice to upgrade pip first.
+  - type: web
+    name: your-service-name 
+    env: python
+    pythonVersion: "3.11"
+    systemPackages:
+      - name: libreoffice-writer # For DOCX
+      - name: libreoffice-calc # If you ever need spreadsheet conversion
+      - name: libreoffice-impress # For presentations
+      - name: libreoffice-common
+      - name: unoconv # Install the unoconv utility script itself
+      # - name: fonts-liberation # Recommended for good font compatibility
     buildCommand: "pip install --upgrade pip && pip install -r requirements.txt"
-
-    # Your start command - how Render runs your application
-    # This assumes you have gunicorn in your requirements.txt
-    startCommand: "gunicorn app:app --timeout 120" # Increased timeout for potentially long file processing
-
-    # Environment Variables - It's BEST PRACTICE to set secrets via Render's dashboard
-    # But you can define non-sensitive ones or reference secrets here.
-    envVars:
-      - key: PYTHON_VERSION # Already set by 'pythonVersion' above, but can be explicit
-        value: "3.11"
-      - key: FLASK_APP # Not strictly needed if gunicorn calls app:app
-        value: "app.py" 
-      # - key: FLASK_ENV # Render often sets NODE_ENV=production, which might affect Flask.
-      #   value: "development" # Or "production"
-      # Set secrets directly in the Render dashboard under your service's "Environment" tab.
-      # Then, if you want to document them here (optional):
-      - key: SUPABASE_URL
-        fromSecret: true # Indicates it's a secret managed in Render's UI
-      - key: SUPABASE_KEY
-        fromSecret: true
-      - key: SECRET_KEY # For Flask sessions
-        fromSecret: true
-      - key: OCR_SPACE_API_KEY
-        fromSecret: true
-      # Optional: For local .env compatibility if you had other vars
-      # - key: ADMIN_INITIAL_PASSWORD 
-      #   fromSecret: true # If you set this as a secret
-
-    # Optional: Health Check Path (Render uses this to see if your app is running)
-    # healthCheckPath: / # Or a specific health check endpoint like /health
-
-    # Optional: Auto-Deploy (usually enabled by default from connected Git branch)
-    # autoDeploy: true 
+    startCommand: "gunicorn app:app --timeout 120"
+    # ... envVars ...

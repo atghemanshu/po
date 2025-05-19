@@ -6,6 +6,8 @@ import random
 import platform 
 import json
 import uuid # Still needed for ATS criteria IDs if you generate them in Python
+import cloudconvert # Import CloudConvert library
+import logging
 
 from functools import wraps
 from dotenv import load_dotenv # For loading .env file
@@ -18,10 +20,13 @@ from flask import (
 # REMOVE: from sqlalchemy_serializer import SerializerMixin
 from supabase import create_client, Client # ADDED for Supabase
 from docx2pdf import convert # Ensure this is imported
+from docx2pdf import convert as docx2pdf_local_convert # Keep for local Windows or if API fails AND LibreOffice not present
+
 from werkzeug.security import generate_password_hash, check_password_hash # Still needed
 from pdfminer.high_level import extract_text as pdf_extract_text
 from docx import Document as DocxDocument
 import requests
+import subprocess
 
 from io import BytesIO
 from reportlab.platypus import (
@@ -47,6 +52,11 @@ app.secret_key = os.environ.get('SECRET_KEY')
 if not app.secret_key:
     raise RuntimeError("SECRET_KEY environment variable not set!")
 app.config['SESSION_TYPE'] = 'filesystem'
+if not app.debug: # For production on Render, you might want a different level
+    app.logger.setLevel(logging.INFO)
+else: # For local debugging
+    app.logger.setLevel(logging.DEBUG) # To see all debug messages
+app.logger.info("Flask App Logger Initialized.")
 
 # --- Supabase Client Initialization ---
 supabase_url: str = os.environ.get("SUPABASE_URL")
@@ -56,6 +66,19 @@ if not supabase_url or not supabase_key:
     raise RuntimeError("SUPABASE_URL or SUPABASE_KEY environment variables not set!")
 supabase: Client = create_client(supabase_url, supabase_key)
 # --- End Supabase Client Initialization ---
+
+# --- CloudConvert Configuration ---
+app.config['CLOUDCONVERT_API_KEY'] = os.environ.get("CLOUDCONVERT_API_KEY") # Store in app.config
+if app.config.get('CLOUDCONVERT_API_KEY'): # Use app.config.get() for checking
+    try:
+        cloudconvert.configure(api_key=app.config['CLOUDCONVERT_API_KEY'], sandbox=False)
+        print("INFO: CloudConvert configured with API key.")
+    except Exception as e_cc_config:
+        print(f"ERROR: Failed to configure CloudConvert: {e_cc_config}")
+        app.config['CLOUDCONVERT_API_KEY'] = None 
+else:
+    print("WARNING: CLOUDCONVERT_API_KEY not set. DOCX to PDF conversion via API will be skipped.")
+# --- End CloudConvert Configuration ---
 
 # --- Configuration ---
 OCR_SPACE_API_URL = "https://api.ocr.space/parse/image"
@@ -76,6 +99,7 @@ else:
 # END OF ADDED BLOCK
 
 load_dotenv() # Call this very early
+
 
 # --- Master Field Definitions (For Admin Configuration Screens) ---
 MASTER_FIELD_DEFINITIONS = {
@@ -246,68 +270,83 @@ def original_extract_text_from_docx(file_path): # Renamed to avoid confusion dur
     except Exception as e:
         print(f"Error during direct DOCX text extraction: {e}") # Use print or app.logger
         return f"Error extracting text directly from DOCX: {e}"
-    
-def extract_text_from_file(temp_file_path, filename): # temp_file_path is the path to the saved uploaded file
+
+def convert_docx_to_pdf_with_subprocess(docx_path, output_dir, app_logger):
+        base_filename = os.path.splitext(os.path.basename(docx_path))[0]
+        pdf_filename = base_filename + ".pdf"
+        # Output path will be in the same directory as the input temp file for simplicity with soffice --outdir
+        # soffice --outdir usually outputs to the specified dir, keeping original filename with new extension.
+        # So, if output_dir is TEMP_FOLDER, pdf_path will be TEMP_FOLDER/filename.pdf
+        
+        # We want the PDF to be in output_dir, so soffice needs write permission there
+        # Ensure the output path doesn't clash if multiple requests happen for same filename (unlikely with temp_filename_base)
+        
+        # Using soffice directly
+        # command = ['soffice', '--headless', '--convert-to', 'pdf', '--outdir', output_dir, docx_path]
+        # Using unoconv (often more user-friendly)
+        pdf_full_output_path = os.path.join(output_dir, pdf_filename)
+        command = ['unoconv', '-f', 'pdf', '-o', pdf_full_output_path, docx_path]
+
+        try:
+            app_logger.info(f"Attempting DOCX->PDF conversion with command: {' '.join(command)}")
+            # Increased timeout for LibreOffice, it can be slow to start up
+            process = subprocess.run(command, capture_output=True, text=True, check=False, timeout=90) 
+
+            if process.returncode == 0 and os.path.exists(pdf_full_output_path):
+                app_logger.info(f"unoconv successful for {docx_path}. PDF at {pdf_full_output_path}")
+                app_logger.debug(f"unoconv stdout: {process.stdout}")
+                if process.stderr: # Log stderr even on success, as LibreOffice can be chatty
+                    app_logger.info(f"unoconv stderr (even on success): {process.stderr}")
+                return pdf_full_output_path
+            else:
+                app_logger.error(f"unoconv conversion failed for {docx_path}.")
+                app_logger.error(f"  Return Code: {process.returncode}")
+                app_logger.error(f"  Stdout: {process.stdout}")
+                app_logger.error(f"  Stderr: {process.stderr}")
+                if not os.path.exists(pdf_full_output_path):
+                    app_logger.error(f"  Output PDF file not found at: {pdf_full_output_path}")
+                return None
+        except subprocess.TimeoutExpired:
+            app_logger.error(f"unoconv conversion timed out for {docx_path}")
+            return None
+        except FileNotFoundError:
+            app_logger.error("ERROR: unoconv (or soffice) command not found. Is LibreOffice installed and in PATH on Render?")
+            return None
+        except Exception as e:
+            app_logger.error(f"Exception during unoconv/soffice conversion for {docx_path}: {e}", exc_info=True)
+            return None
+
+def extract_text_from_file(temp_file_path, filename):
     _, file_extension = os.path.splitext(filename)
     file_extension = file_extension.lower()
+    app_logger = app.logger # Get a reference to the app logger
 
     if file_extension in ['.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff']:
         return ocr_image_via_api(temp_file_path)
     elif file_extension == '.pdf':
         return extract_text_from_pdf(temp_file_path)
     elif file_extension == '.docx':
-        print(f"INFO: Processing DOCX file: {filename}")
-        pdf_output_path = temp_file_path + ".pdf" # Create a new path for the PDF
+        app_logger.info(f"Processing DOCX file: {filename} at {temp_file_path}")
         
-        # --- MODIFICATION STARTS HERE ---
-        com_initialized_this_call = False # Flag to ensure we only uninitialize if this specific call initialized COM
-        try:
-            if pythoncom and platform.system() == "Windows":
-                try:
-                    # COINIT_APARTMENTTHREADED is typically required for Office automation / UI components.
-                    pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
-                    com_initialized_this_call = True
-                    print(f"INFO: CoInitializeEx(COINIT_APARTMENTTHREADED) called for DOCX conversion of '{filename}'.")
-                except pythoncom.com_error as e:
-                    # This can happen if COM is already initialized, possibly with a different concurrency model.
-                    # RPC_E_CHANGED_MODE (0x80010106) means it's already initialized differently.
-                    # S_FALSE (1) means it's already initialized with the same mode (not an error pythoncom raises).
-                    # If an exception occurs, we assume this call didn't establish initialization,
-                    # so com_initialized_this_call remains False.
-                    print(f"WARNING: CoInitializeEx for '{filename}' reported an issue (HRESULT: {e.hresult}, Details: {e.strerror}). Conversion will proceed; existing COM state might be incompatible or already suitable.")
-                    # com_initialized_this_call remains False, so CoUninitialize won't be called by this scope's finally.
-
-            print(f"INFO: Attempting to convert '{filename}' to PDF at '{pdf_output_path}'...")
-            convert(temp_file_path, pdf_output_path) # temp_file_path is the input DOCX
-            
-            if os.path.exists(pdf_output_path):
-                print(f"INFO: DOCX successfully converted to PDF. Extracting text from PDF: {pdf_output_path}")
-                text_from_pdf = extract_text_from_pdf(pdf_output_path)
-                try:
-                    os.remove(pdf_output_path) # Clean up the temporary PDF
-                    print(f"INFO: Temporary PDF '{pdf_output_path}' removed.")
-                except OSError as e_os:
-                    print(f"WARNING: Could not remove temporary PDF '{pdf_output_path}': {e_os}")
-                return text_from_pdf
-            else:
-                print(f"WARNING: DOCX to PDF conversion for '{filename}' did not create output file. Falling back to direct DOCX extraction.")
-                return original_extract_text_from_docx(temp_file_path) # Use original direct method
-
-        except Exception as e_convert:
-            print(f"ERROR: Failed to convert DOCX '{filename}' to PDF or process it: {e_convert}")
-            print(f"INFO: Falling back to direct text extraction from DOCX for '{filename}'.")
-            return original_extract_text_from_docx(temp_file_path) 
-        finally:
-            if com_initialized_this_call and pythoncom and platform.system() == "Windows":
-                try:
-                    pythoncom.CoUninitialize()
-                    print(f"INFO: CoUninitialize called for DOCX conversion of '{filename}'.")
-                except Exception as e_uninit:
-                    print(f"ERROR: CoUninitialize failed for '{filename}': {e_uninit}")
-        # --- MODIFICATION ENDS HERE ---
-            
+        # Attempt conversion using unoconv/soffice (LibreOffice)
+        # TEMP_FOLDER is the directory where temp_file_path (original DOCX) resides.
+        # We'll ask unoconv to output the PDF to the same TEMP_FOLDER.
+        pdf_converted_path = convert_docx_to_pdf_with_subprocess(temp_file_path, TEMP_FOLDER, app_logger)
+        
+        if pdf_converted_path:
+            app_logger.info(f"Successfully converted DOCX to PDF: {pdf_converted_path}. Extracting text from this PDF.")
+            text_from_converted_pdf = extract_text_from_pdf(pdf_converted_path)
+            try:
+                os.remove(pdf_converted_path)
+                app_logger.info(f"Cleaned up temporary PDF: {pdf_converted_path}")
+            except OSError as e_os:
+                app_logger.warning(f"Could not remove temporary PDF '{pdf_converted_path}': {e_os}")
+            return text_from_converted_pdf
+        else:
+            app_logger.warning(f"DOCX to PDF conversion using unoconv/soffice failed for '{filename}'. Falling back to direct DOCX text extraction.")
+            return original_extract_text_from_docx(temp_file_path)
+        
     return f"Error: Unsupported file format '{file_extension}'."
-
 # --- Structured Data Extraction ---
 def extract_structured_data(text, fields_to_extract_labels, upload_type=None):
     if not text or not isinstance(text, str) or not fields_to_extract_labels:
