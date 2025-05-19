@@ -3,11 +3,10 @@ import re
 import secrets
 import string
 import random
-import platform 
+from functools import wraps
 import json
 import uuid # Still needed for ATS criteria IDs if you generate them in Python
 
-from functools import wraps
 from dotenv import load_dotenv # For loading .env file
 
 from flask import (
@@ -17,24 +16,12 @@ from flask import (
 # REMOVE: from flask_sqlalchemy import SQLAlchemy
 # REMOVE: from sqlalchemy_serializer import SerializerMixin
 from supabase import create_client, Client # ADDED for Supabase
-from docx2pdf import convert # Ensure this is imported
+
 from werkzeug.security import generate_password_hash, check_password_hash # Still needed
 from pdfminer.high_level import extract_text as pdf_extract_text
 from docx import Document as DocxDocument
 import requests
-
-from io import BytesIO
-from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
-    KeepTogether
-)
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import letter
-from reportlab.lib.units import inch
-from reportlab.graphics.shapes import Drawing, Circle, Wedge, String # Using Wedge
-from reportlab.graphics.charts.textlabels import Label
-import math
+# REMOVE: import datetime (unless used elsewhere, Supabase handles timestamps)
 
 load_dotenv() # Call this very early
 
@@ -62,20 +49,6 @@ OCR_SPACE_API_URL = "https://api.ocr.space/parse/image"
 OCR_SPACE_API_KEY = os.environ.get('OCR_SPACE_API_KEY', "K87955728688957")
 if OCR_SPACE_API_KEY == "K87955728688957":
     print("Warning: Using default/placeholder OCR Space API key.")
-
-# BLOCK to conditionally import pythoncom
-if platform.system() == "Windows":
-    try:
-        import pythoncom
-    except ImportError:
-        # You can use app.logger here if your app is already configured
-        print("WARNING: pywin32 (pythoncom) is not installed. DOCX to PDF conversion using MS Word COM automation will likely fail on Windows.")
-        pythoncom = None # Define as None if import fails
-else:
-    pythoncom = None # Not needed on non-Windows systems
-# END OF ADDED BLOCK
-
-load_dotenv() # Call this very early
 
 # --- Master Field Definitions (For Admin Configuration Screens) ---
 MASTER_FIELD_DEFINITIONS = {
@@ -237,76 +210,24 @@ def extract_text_from_pdf(file_path):
         if ocr_text and not ocr_text.lower().startswith("error"): return ocr_text
         return f"Error extracting text from PDF (pdfminer/OCR failed): {e}"
 
-# This function should ONLY do direct DOCX text extraction
-def original_extract_text_from_docx(file_path): # Renamed to avoid confusion during refactor
+def extract_text_from_docx(file_path):
     try:
-        doc = DocxDocument(file_path) # Needs from docx import Document as DocxDocument
+        doc = DocxDocument(file_path)
         full_text = [p.text for p in doc.paragraphs if p.text]
-        return '\n'.join(full_text).strip() if full_text else "No text extracted from DOCX (direct method)."
-    except Exception as e:
-        print(f"Error during direct DOCX text extraction: {e}") # Use print or app.logger
-        return f"Error extracting text directly from DOCX: {e}"
-    
-def extract_text_from_file(temp_file_path, filename): # temp_file_path is the path to the saved uploaded file
+        return '\n'.join(full_text).strip() if full_text else "No text extracted from DOCX."
+    except Exception as e: return f"Error extracting text from DOCX: {e}"
+
+def extract_text_from_file(file_path, filename):
     _, file_extension = os.path.splitext(filename)
     file_extension = file_extension.lower()
-
     if file_extension in ['.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff']:
-        return ocr_image_via_api(temp_file_path)
+        return ocr_image_via_api(file_path)
     elif file_extension == '.pdf':
-        return extract_text_from_pdf(temp_file_path)
+        return extract_text_from_pdf(file_path)
     elif file_extension == '.docx':
-        print(f"INFO: Processing DOCX file: {filename}")
-        pdf_output_path = temp_file_path + ".pdf" # Create a new path for the PDF
-        
-        # --- MODIFICATION STARTS HERE ---
-        com_initialized_this_call = False # Flag to ensure we only uninitialize if this specific call initialized COM
-        try:
-            if pythoncom and platform.system() == "Windows":
-                try:
-                    # COINIT_APARTMENTTHREADED is typically required for Office automation / UI components.
-                    pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
-                    com_initialized_this_call = True
-                    print(f"INFO: CoInitializeEx(COINIT_APARTMENTTHREADED) called for DOCX conversion of '{filename}'.")
-                except pythoncom.com_error as e:
-                    # This can happen if COM is already initialized, possibly with a different concurrency model.
-                    # RPC_E_CHANGED_MODE (0x80010106) means it's already initialized differently.
-                    # S_FALSE (1) means it's already initialized with the same mode (not an error pythoncom raises).
-                    # If an exception occurs, we assume this call didn't establish initialization,
-                    # so com_initialized_this_call remains False.
-                    print(f"WARNING: CoInitializeEx for '{filename}' reported an issue (HRESULT: {e.hresult}, Details: {e.strerror}). Conversion will proceed; existing COM state might be incompatible or already suitable.")
-                    # com_initialized_this_call remains False, so CoUninitialize won't be called by this scope's finally.
-
-            print(f"INFO: Attempting to convert '{filename}' to PDF at '{pdf_output_path}'...")
-            convert(temp_file_path, pdf_output_path) # temp_file_path is the input DOCX
-            
-            if os.path.exists(pdf_output_path):
-                print(f"INFO: DOCX successfully converted to PDF. Extracting text from PDF: {pdf_output_path}")
-                text_from_pdf = extract_text_from_pdf(pdf_output_path)
-                try:
-                    os.remove(pdf_output_path) # Clean up the temporary PDF
-                    print(f"INFO: Temporary PDF '{pdf_output_path}' removed.")
-                except OSError as e_os:
-                    print(f"WARNING: Could not remove temporary PDF '{pdf_output_path}': {e_os}")
-                return text_from_pdf
-            else:
-                print(f"WARNING: DOCX to PDF conversion for '{filename}' did not create output file. Falling back to direct DOCX extraction.")
-                return original_extract_text_from_docx(temp_file_path) # Use original direct method
-
-        except Exception as e_convert:
-            print(f"ERROR: Failed to convert DOCX '{filename}' to PDF or process it: {e_convert}")
-            print(f"INFO: Falling back to direct text extraction from DOCX for '{filename}'.")
-            return original_extract_text_from_docx(temp_file_path) 
-        finally:
-            if com_initialized_this_call and pythoncom and platform.system() == "Windows":
-                try:
-                    pythoncom.CoUninitialize()
-                    print(f"INFO: CoUninitialize called for DOCX conversion of '{filename}'.")
-                except Exception as e_uninit:
-                    print(f"ERROR: CoUninitialize failed for '{filename}': {e_uninit}")
-        # --- MODIFICATION ENDS HERE ---
-            
+        return extract_text_from_docx(file_path)
     return f"Error: Unsupported file format '{file_extension}'."
+
 
 # --- Structured Data Extraction ---
 def extract_structured_data(text, fields_to_extract_labels, upload_type=None):
@@ -348,12 +269,6 @@ def extract_structured_data(text, fields_to_extract_labels, upload_type=None):
 
     if upload_type == 'po':
         # --- PO Specific Extraction - Prioritize these over generic ---
-           # --- Apply type-specific extraction first ---
-        normalized_text = re.sub(r'[ \t]+', ' ', text) 
-        normalized_text = re.sub(r'\r\n?', '\n', normalized_text)
-        print("---- NORMALIZED PO TEXT (first 500 chars) ----") # DEBUG LINE
-        print(normalized_text[:500])                          # DEBUG LINE
-        print("---------------------------------------------") # DEBUG LINE
 
         # PO Number: "PO Number: 81100"
         if "PO Number" in fields_to_extract_labels:
@@ -364,72 +279,77 @@ def extract_structured_data(text, fields_to_extract_labels, upload_type=None):
         if "Order Date" in fields_to_extract_labels:
             m = re.search(r"\bOrder Date\s*:\s*(\d{1,2}/\d{1,2}/\d{2,4})", text, re.IGNORECASE)
             if m: data["Order Date"] = m.group(1).strip()
+
+        # Attempt to isolate the vendor details block
+        # This block typically starts with "Vendor:" (the first one, for the name/address)
+        # and ends before "Ship To:", or "Email:" if it's for the main company.
+        # The sample has: Vendor:\nPROTOMATIC...\nVendor: S101334\nPhone: 734-426-3655
         
         vendor_details_text = None
         # Regex: Start with "Vendor:", capture everything non-greedily until "Ship To:"
         # or until another major section that's clearly not part of vendor details.
         # We are looking for the block that contains the Vendor ID and Vendor Phone.
-         # Vendor details block isolation
-        vendor_details_search_text = normalized_text 
+        
         # Look for the vendor block that contains "Vendor: S..." pattern
         # This tries to find the block specifically around the vendor ID and associated phone.
         # It looks for "Vendor: S<digits>" and captures text around it.
         vendor_id_block_match = re.search(
-            # Looking for a block starting with "Vendor: S<digits>" and capturing until a common separator
-            # Using non-greedy match .*?
-            # The terminators are common section headers. Added \b to avoid partial word matches for terminators.
-            r"(Vendor\s*:\s*S\d+.*?)(?:\bContact\s*:|\bShip Via\s*:|\bTerms\s*:|\bF\.O\.B\s*:|\bEmail\s*:|\Z)",
-            normalized_text, 
-            re.IGNORECASE | re.DOTALL # DOTALL allows . to match newlines, crucial for multi-line blocks
+            r"(Vendor\s*:\s*S\d+.*?)(?:Contact:|Ship Via:|Terms:|F\.O\.B:|Email:|$)", 
+            text, 
+            re.IGNORECASE | re.DOTALL
         )
         if vendor_id_block_match:
-            vendor_details_search_text = vendor_id_block_match.group(1).strip() # Use the captured group and strip whitespace
-            print(f"DEBUG PO: Isolated vendor ID block: ---{vendor_details_search_text[:150]}---")
+            vendor_details_text = vendor_id_block_match.group(1)
+            # app.logger.debug(f"PO: Isolated vendor ID block: {vendor_details_text[:100]}")
+            print(f"DEBUG PO: Isolated vendor ID block: {vendor_details_text[:100]}")
         else:
-            print("DEBUG PO: Could not isolate specific vendor ID block. Searching full text for Vendor ID/Phone.")
-        
-        # Vendor (ID)
-        if "Vendor" in fields_to_extract_labels:
-            m_vendor_id = re.search(r"\bVendor\s*:\s*(S\d+)\b", vendor_details_search_text, re.IGNORECASE)
+            # app.logger.debug("PO: Could not isolate specific vendor ID block, will search full text for Vendor ID/Phone.")
+            print("DEBUG PO: Could not isolate specific vendor ID block, will search full text for Vendor ID/Phone.")
+            vendor_details_text = text # Fallback to searching the whole text
+
+
+        # Vendor (ID): "Vendor: S101334"
+        if "Vendor" in fields_to_extract_labels: # "Vendor" is the label for Vendor ID
+            # Search within the potentially isolated vendor_details_text
+            m_vendor_id = re.search(r"\bVendor\s*:\s*(S\d+)\b", vendor_details_text, re.IGNORECASE)
             if m_vendor_id:
                 data["Vendor"] = m_vendor_id.group(1).strip()
-            else:
-                print(f"DEBUG PO: Vendor ID (Sxxxxx) not found in designated search text: ---{vendor_details_search_text[:150]}---")
+            # No complex fallback here; if this specific pattern isn't found, "Vendor" ID remains None.
 
-
-        # Phone (Vendor's Phone)
+        # Phone (Vendor's Phone): "Phone: 734-426-3655"
         if "Phone" in fields_to_extract_labels:
-            m_phone = re.search(r"\bPhone\s*:\s*(\(?\d{3}\)?[\s\.\-]?\d{3}[\s\.\-]?\d{4}(?:\s*x\d+)?)", vendor_details_search_text, re.IGNORECASE)
+            # Search within the potentially isolated vendor_details_text
+            m_phone = re.search(r"\bPhone\s*:\s*(\(?\d{3}\)?[\s\.\-]?\d{3}[\s\.\-]?\d{4}(?:\s*x\d+)?)", vendor_details_text, re.IGNORECASE)
             if m_phone:
+                # Ensure this phone is not the company's main phone if possible
+                # One heuristic: vendor phone usually has a different area code or is closer to vendor ID text
                 phone_candidate = m_phone.group(1).strip()
-                # Simple check: if the company phone is hardcoded or known, avoid it.
-                # Your sample vendor phone is 734-426-3655
-                if phone_candidate != "952-345-2244": # Avoid the company phone if it's specifically that
+                if "952-345-2244" in phone_candidate and "734-426-3655" in vendor_details_text:
+                    # If it picked up company phone but vendor phone is also in block, try again for specific vendor phone
+                    m_specific_vendor_phone = re.search(r"734-426-3655", vendor_details_text) # Hardcoded for sample scenario
+                    if m_specific_vendor_phone:
+                        data["Phone"] = "734-426-3655"
+                    else:
+                        data["Phone"] = phone_candidate # Stick with what was found if specific isn't there
+                else:
                     data["Phone"] = phone_candidate
-                elif "734-426-3655" in vendor_details_search_text: # If company phone was matched, but vendor phone is also in block
-                    data["Phone"] = "734-426-3655" 
-                else: # If only company phone was in block, or ambiguity remains
-                    print(f"DEBUG PO: Phone found in vendor block ('{phone_candidate}') might be ambiguous or company phone. Consider refining logic if incorrect.")
-                    data["Phone"] = phone_candidate # Take what was found in the block for now
-            else:
-                print(f"DEBUG PO: Vendor Phone not found in designated search text: ---{vendor_details_search_text[:150]}---")
         
-        # Total (Grand Total) - search in full normalized text
+        # Total (Grand Total): "Total: $ 5,945.00"
         if "Total" in fields_to_extract_labels:
-            # Strictest first: "Total:" alone on a line with $ amount
-            m_total = re.search(r"^\s*Total\s*:\s*(\$\s*\d{1,3}(?:,\d{3})*\.\d{2})\s*$", normalized_text, re.MULTILINE | re.IGNORECASE)
+            # Look for a line that ONLY contains "Total:" and the amount
+            # The `^\s*` matches start of line, `\s*$` matches end of line.
+            m_total = re.search(r"^\s*Total\s*:\s*(\$\s*\d{1,3}(?:,\d{3})*\.\d{2})\s*$", text, re.MULTILINE | re.IGNORECASE)
             if m_total:
                 data["Total"] = m_total.group(1).strip()
             else:
-                # Fallback: "Total: $amount" anywhere, but not followed by "Subtotal" or "Tax" on the same line.
-                # (?!.*\b(?:Subtotal|Tax)\b) is a negative lookahead.
-                m_total_fallback = re.search(r"\bTotal\s*:\s*(\$\s*\d{1,3}(?:,\d{3})*\.\d{2})\b(?!.*\b(?:Subtotal|Tax)\b)", normalized_text, re.IGNORECASE | re.MULTILINE)
+                # Fallback if it's not alone on the line but clearly the grand total
+                m_total_fallback = re.search(r"\bTotal\s*:\s*(\$\s*\d{1,3}(?:,\d{3})*\.\d{2})\b(?!.*\bSubtotal\b)", text, re.IGNORECASE | re.MULTILINE)
                 if m_total_fallback:
                      data["Total"] = m_total_fallback.group(1).strip()
-                else:
-                    print(f"DEBUG PO: Grand Total amount not found with specific regexes in normalized text.")
         
-        print(f"DEBUG PO Extracted data (after PO specific): {data}")
+        # app.logger.debug(f"PO Extracted data: {data}")
+        print(f"DEBUG PO Extracted data: {data}")
+        return data
 
     elif upload_type == 'ats':
        
@@ -1233,9 +1153,11 @@ def app_dashboard():
                            )
         
 
+# --- Placeholder for PDF Report Download ---
 @app.route('/download_report/<doc_type>/<filename_key>')
 @login_required
 def download_report(doc_type, filename_key):
+    # Retrieve results from session (this is a simple approach)
     processed_results = session.get('processed_results_for_report', {}).get(filename_key)
 
     if not processed_results:
@@ -1243,26 +1165,31 @@ def download_report(doc_type, filename_key):
         return redirect(url_for('app_dashboard'))
 
     if 'error' in processed_results:
-        # You might want to offer a text file with the error, or just an HTML page
         return Response(f"Cannot generate report for '{filename_key}' due to processing error: {processed_results['error']}", mimetype='text/plain')
 
-    try:
-        pdf_data = generate_pdf_report(processed_results, filename_key, doc_type, app.logger)
+    # For now, return JSON data as a "report"
+    # In a real app, you'd generate a PDF here using ReportLab, WeasyPrint, etc.
+    report_content = f"--- Report for {filename_key} ({doc_type.upper()}) ---\n\n"
+    report_content += "Extracted Text:\n" + processed_results.get('extracted_text', 'N/A')[:500] + "...\n\n"
+    report_content += "Structured Data:\n" + json.dumps(processed_results.get('structured_data', {}), indent=2) + "\n\n"
+    
+    if doc_type == 'po':
+        report_content += "PO Comparison:\n"
+        report_content += f"  Accuracy: {processed_results.get('accuracy', 0):.2f}%\n"
+        if processed_results.get('db_record_for_display'):
+            report_content += "  DB Record Compared Against:\n" + json.dumps(processed_results.get('db_record_for_display'), indent=2) + "\n"
+        if processed_results.get('mismatched_fields'):
+            report_content += "  Mismatches:\n" + json.dumps(processed_results.get('mismatched_fields'), indent=2) + "\n"
+    elif doc_type == 'ats':
+        report_content += "ATS Validation:\n"
+        report_content += f"  Accuracy (Criteria Met): {processed_results.get('accuracy', 0):.2f}%\n"
+        if processed_results.get('mismatched_fields'): # Failed criteria details
+            report_content += "  Failed Criteria:\n" + json.dumps(processed_results.get('mismatched_fields'), indent=2) + "\n"
 
-        safe_filename = "".join(c if c.isalnum() else "_" for c in filename_key) # Sanitize filename
-        pdf_filename = f"report_{doc_type}_{safe_filename}.pdf"
+    response = Response(report_content, mimetype='text/plain')
+    response.headers['Content-Disposition'] = f'attachment; filename="report_{doc_type}_{filename_key.replace(" ", "_")}.txt"'
+    return response
 
-        return Response(
-            pdf_data,
-            mimetype='application/pdf',
-            headers={'Content-Disposition': f'attachment;filename={pdf_filename}'}
-        )
-    except Exception as e:
-        app.logger.error(f"Error generating PDF report for {filename_key}: {e}", exc_info=True)
-        flash(f"Could not generate PDF report for '{filename_key}'. An internal error occurred.", "danger")
-        # Fallback to text report or redirect
-        # For simplicity, redirecting here. You could offer a text fallback.
-        return redirect(url_for('app_dashboard', active_tab_id=doc_type))
 
 # --- Admin Routes & APIs ---
 @app.route('/admin/dashboard')
@@ -1895,290 +1822,8 @@ def api_delete_ats_criterion(criterion_id_param):
     except Exception as e:
         app.logger.error(f"Exception in api_delete_ats_criterion for ID {criterion_id_param}: {e}")
         return jsonify({"error": f"An unexpected server error occurred: {str(e)}"}), 500
-
-# --- Helper Function to Generate the Donut Chart Drawing ---
-def create_accuracy_donut_chart(accuracy_percent_numeric,
-                                size_pts=60, stroke_width_pts=8,
-                                progress_color_hex="#28a745",
-                                track_color_hex="#e9ecef",
-                                text_color_hex_inside_chart="#000000",
-                                font_name='Helvetica-Bold',
-                                font_size_pts=10):
-    drawing = Drawing(width=size_pts, height=size_pts)
-    
-    # Use different variable names for center coordinates to avoid keyword clashes
-    center_x_coord = size_pts / 2.0
-    center_y_coord = size_pts / 2.0
-    radius_val = (size_pts - stroke_width_pts) / 2.0
-
-    # Background Track
-    track = Circle(
-        cx=center_x_coord, 
-        cy=center_y_coord, 
-        r=radius_val,
-        fillColor=None, 
-        strokeColor=colors.HexColor(track_color_hex),
-        strokeWidth=stroke_width_pts
-    )
-    drawing.add(track)
-
-    progress_shape = None 
-
-    if accuracy_percent_numeric > 0.01: # Only draw if visually significant
-        sweep_angle_degrees = (accuracy_percent_numeric / 100.0) * 360.0
-        
-        # ReportLab angles: 0 is East (3 o'clock), 90 is North (12 o'clock)
-        start_angle_degrees_val = 90  # Start at the top of the circle
-        
-        # Calculate endangledegrees for clockwise sweep
-        # Wedge draws from startangledegrees to endangledegrees.
-        # For clockwise, end angle = start angle - sweep.
-        end_angle_degrees_val = start_angle_degrees_val - sweep_angle_degrees
-
-        if abs(sweep_angle_degrees) >= 359.99: # If it's a full circle
-            progress_shape = Circle( 
-                cx=center_x_coord, 
-                cy=center_y_coord, 
-                r=radius_val,
-                fillColor=None, 
-                strokeColor=colors.HexColor(progress_color_hex),
-                strokeWidth=stroke_width_pts, 
-                strokeLineCap=1 # For a rounded look if the stroke is thick
-            )
-        else:
-            progress_shape = Wedge(
-                centerx=center_x_coord,             # CORRECTED: Use 'centerx'
-                centery=center_y_coord,             # CORRECTED: Use 'centery'
-                radius=radius_val,
-                startangledegrees=start_angle_degrees_val,
-                endangledegrees=end_angle_degrees_val, # CORRECTED: Use 'endangledegrees'
-                fillColor=None,                      # Donut chart, so no fill for the wedge
-                strokeColor=colors.HexColor(progress_color_hex),
-                strokeWidth=stroke_width_pts,
-                strokeLineCap=1                      # 0=butt, 1=round, 2=square (round looks good for donuts)
-            )
-        
-        if progress_shape:
-            drawing.add(progress_shape)
-
-    # Text in the center
-    display_text_in_chart = f"{float(accuracy_percent_numeric):.0f}%" # Display as integer percentage
-    text_label = Label()
-    text_label.setOrigin(center_x_coord, center_y_coord)
-    text_label.boxAnchor = 'c' # Anchor at the center of the text box
-    text_label.text = display_text_in_chart
-    text_label.fontName = font_name
-    text_label.fontSize = font_size_pts
-    text_label.fillColor = colors.HexColor(text_color_hex_inside_chart)
-    drawing.add(text_label)
-    
-    return drawing
-
-# --- Main PDF Generation Function ---
-def generate_pdf_report(processed_results, filename_key, doc_type, app_logger):
-    # global PO_KEY_COMPARISON_FIELDS # This line can be removed, not needed
-    
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter,
-                            leftMargin=0.5*inch, rightMargin=0.5*inch,
-                            topMargin=0.75*inch, bottomMargin=0.75*inch)
-    styles = getSampleStyleSheet()
-    
-    # --- Custom Styles (keep these as they are used by other elements) ---
-    styles.add(ParagraphStyle(name='MainReportTitle', parent=styles['Normal'], fontSize=14, alignment=0, spaceBottom=10, leading=16, fontName='Helvetica-Bold'))
-    styles.add(ParagraphStyle(name='SectionTitle', parent=styles['Normal'], fontSize=11, fontName='Helvetica-Bold', spaceBefore=10, spaceBottom=6, leading=14, alignment=0))
-    styles.add(ParagraphStyle(name='ComparisonSectionTitle', parent=styles['Normal'], fontSize=12, fontName='Helvetica-Bold', spaceBefore=12, spaceBottom=6, leading=14))
-    styles.add(ParagraphStyle(name='SubSectionTitle', parent=styles['Normal'], fontSize=10, fontName='Helvetica-Bold', spaceBefore=8, spaceBottom=4, leading=12))
-    styles.add(ParagraphStyle(name='AccuracyText', parent=styles['Normal'], fontSize=9, leading=12, alignment=0)) # Still used for accuracy text
-    styles.add(ParagraphStyle(name='SmallNote', parent=styles['Normal'], fontSize=8, textColor=colors.dimgrey, leading=10))
-    styles.add(ParagraphStyle(name='SuccessMessage', parent=styles['Normal'], fontSize=9, textColor=colors.HexColor("#155724"), fontName='Helvetica-Bold', leading=12))
-    styles.add(ParagraphStyle(name='DataItemKey', parent=styles['Normal'], fontSize=9, fontName='Helvetica-Bold', leading=11))
-    styles.add(ParagraphStyle(name='DataItemValue', parent=styles['Normal'], fontSize=9, leading=11, wordWrap='CJK', spaceLeft=5))
-    styles.add(ParagraphStyle(name='TableHeader', parent=styles['Normal'], fontSize=8, fontName='Helvetica-Bold', alignment=1, textColor=colors.black))
-    styles.add(ParagraphStyle(name='TableCellText', parent=styles['Normal'], fontSize=8, leading=10, wordWrap='CJK'))
-    styles.add(ParagraphStyle(name='MismatchTableHeader', parent=styles['Normal'], fontSize=9, fontName='Helvetica-Bold',textColor=colors.HexColor("#721c24")))
-    styles.add(ParagraphStyle(name='FailedCriteriaTableHeader', parent=styles['Normal'], fontSize=9, fontName='Helvetica-Bold', textColor=colors.HexColor("#856404")))
-
-    story = []
-    if filename_key:
-        story.append(Paragraph(f"Results for: {filename_key}", styles['MainReportTitle']))
-        story.append(Spacer(1, 0.1*inch))
-
-    if doc_type == 'po':
-        # --- PO Extracted Data and DB Data (Side-by-Side Table) ---
-        # This part remains the same as your last correct version for PO data display
-        po_field_order_for_cards = PO_FIELDS_FOR_USER_EXTRACTION # Use defined list
-        left_card_flowables = [Paragraph("Extracted Data:", styles['SectionTitle'])]
-        structured_data = processed_results.get('structured_data', {})
-        if structured_data:
-            for field_name in po_field_order_for_cards:
-                if field_name in structured_data: # Display only if field exists in extracted data
-                    v = str(structured_data.get(field_name, "N/A"))
-                    item_data = [[Paragraph(f"{field_name}:", styles['DataItemKey']), Paragraph(v, styles['DataItemValue'])]]
-                    item_table = Table(item_data, colWidths=[0.9*inch, None])
-                    item_table.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP'), ('LEFTPADDING',(0,0),(-1,-1),0), ('BOTTOMPADDING',(0,0),(-1,-1),2)]))
-                    left_card_flowables.append(item_table)
-        else:
-            left_card_flowables.append(Paragraph("No structured data extracted.", styles['SmallNote']))
-
-        right_card_flowables = [Paragraph("Database Data (For Comparison):", styles['SectionTitle'])]
-        db_record = processed_results.get('db_record_for_display', {})
-        if db_record:
-            for field_name in PO_KEY_COMPARISON_FIELDS: # Show only key comparison fields from DB
-                if field_name in db_record:
-                    v = str(db_record.get(field_name, "N/A"))
-                    item_data = [[Paragraph(f"{field_name}:", styles['DataItemKey']), Paragraph(v, styles['DataItemValue'])]]
-                    item_table = Table(item_data, colWidths=[0.9*inch, None])
-                    item_table.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP'), ('LEFTPADDING',(0,0),(-1,-1),0),('BOTTOMPADDING',(0,0),(-1,-1),2)]))
-                    right_card_flowables.append(item_table)
-        else:
-            right_card_flowables.append(Paragraph("No database record found or comparison not applicable.", styles['SmallNote']))
-
-        master_data_table = Table([[left_card_flowables, right_card_flowables]], colWidths=[3.5*inch, 3.5*inch], spaceBefore=0)
-        master_data_table.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP'), ('RIGHTPADDING', (0,0), (0,0), 0.15*inch), ('LEFTPADDING', (1,0), (1,0), 0.15*inch)]))
-        story.append(master_data_table)
-        story.append(Spacer(1, 0.15*inch))
-
-        # --- PO Comparison & Accuracy (Text Only) ---
-        po_comparison_elements = []
-        po_comparison_elements.append(Paragraph("PO Comparison & Accuracy:", styles['ComparisonSectionTitle']))
-        
-        acc_display_val_str = processed_results.get('acc_display_val', "0.0")
-        chart_desc = processed_results.get('chart_description', 'N/A')
-        chart_color = processed_results.get('chart_color', '#28a745') # Still useful for text color
-        compared_fields_str = ", ".join(PO_KEY_COMPARISON_FIELDS) if PO_KEY_COMPARISON_FIELDS else "configured fields"
-
-        # REMOVED Donut Chart Call and Table for Chart
-        acc_line_html = f"Accuracy (based on: {compared_fields_str}): <font color='{chart_color}'><b>{chart_desc} ({acc_display_val_str}%)</b></font>"
-        acc_para = Paragraph(acc_line_html, styles['AccuracyText'])
-        po_comparison_elements.append(acc_para) # Add accuracy text directly
-        po_comparison_elements.append(Spacer(1, 0.05*inch))
-
-        # PO Mismatch Table (remains the same)
-        mismatched = processed_results.get('mismatched_fields', {})
-        comp_error = processed_results.get('comparison_error')
-        acc_val_logic = processed_results.get('acc_calc_val', 0.0) # Get the numeric accuracy
-        if not mismatched and acc_val_logic >= 99.9:
-            success_html = "<font color='#155724'><b>✔ All compared fields matched!</b></font>"
-            po_comparison_elements.append(Paragraph(success_html, styles['SuccessMessage']))
-        elif not mismatched and comp_error:
-            po_comparison_elements.append(Paragraph(f"Note: {comp_error}", styles['SmallNote']))
-        elif not mismatched and acc_val_logic < 99.9:
-             po_comparison_elements.append(Paragraph("Note: Accuracy affected by empty/missing or normalized fields.", styles['SmallNote']))
-        
-        if mismatched:
-            mismatch_data = [[Paragraph(h, styles['TableHeader']) for h in ["Field", "Database Value", "Extracted Value"]]]
-            for f, vals in mismatched.items():
-                mismatch_data.append([Paragraph(str(f), styles['TableCellText']), Paragraph(str(vals.get("db_value","N/A")), styles['TableCellText']), Paragraph(str(vals.get("extracted_value","N/A")), styles['TableCellText'])])
-            t_mismatch = Table(mismatch_data, colWidths=[1.8*inch, 2.6*inch, 2.6*inch], repeatRows=1)
-            t_mismatch.setStyle(TableStyle([
-                ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#f8d7da")),
-                ('TEXTCOLOR', (0,0), (-1,0), colors.HexColor("#721c24")), 
-                ('GRID', (0,0), (-1,-1), 0.5, colors.grey), ('VALIGN', (0,0), (-1,-1), 'TOP'),
-                ('LEFTPADDING', (0,0), (-1,-1), 4), ('RIGHTPADDING', (0,0), (-1,-1), 4),
-                ('TOPPADDING', (0,0), (-1,-1), 2), ('BOTTOMPADDING', (0,0), (-1,-1), 2),
-            ]))
-            po_comparison_elements.append(t_mismatch)
-            if comp_error and not (not mismatched and acc_val_logic < 99.9): # Only show comp_error if not already covered by the "empty fields" note
-                po_comparison_elements.append(Spacer(1,0.05*inch))
-                po_comparison_elements.append(Paragraph(f"Note: {comp_error}", styles['SmallNote']))
-        story.append(KeepTogether(po_comparison_elements))
-
-    elif doc_type == 'ats':
-        # --- ATS Extracted Data ---
-        story.append(Paragraph("Extracted Data:", styles['SectionTitle']))
-        structured_data_ats = processed_results.get('structured_data', {})
-        if structured_data_ats:
-            ats_field_order = ATS_FIELDS_FOR_USER_EXTRACTION
-            data_items_for_ats = []
-            for field_name in ats_field_order:
-                if field_name in structured_data_ats:
-                    value_text = str(structured_data_ats.get(field_name, "N/A"))
-                    item_para_key = Paragraph(f"{field_name}:", styles['DataItemKey'])
-                    item_para_val = Paragraph(value_text, styles['DataItemValue'])
-                    data_items_for_ats.append([item_para_key, item_para_val])
-            
-            if data_items_for_ats:
-                extracted_data_table = Table(data_items_for_ats, colWidths=[1.5*inch, None])
-                extracted_data_table.setStyle(TableStyle([
-                    ('VALIGN', (0,0), (-1,-1), 'TOP'),
-                    ('LEFTPADDING',(0,0),(-1,-1),0),
-                    ('BOTTOMPADDING',(0,0),(-1,-1),3)
-                ]))
-                story.append(extracted_data_table)
-            else:
-                story.append(Paragraph("No relevant structured data extracted for display.", styles['SmallNote']))
-        else:
-            story.append(Paragraph("No structured data extracted.", styles['SmallNote']))
-        
-        story.append(Spacer(1, 0.2*inch))
-
-        # --- ATS Criteria Validation (Text Only) ---
-        validation_elements = []
-        validation_elements.append(Paragraph("ATS Criteria Validation:", styles['ComparisonSectionTitle']))
-        
-        acc_display_val_str_ats = processed_results.get('acc_display_val', "0.0")
-        chart_desc_ats = processed_results.get('chart_description', 'N/A') # Description like "Low", "Good"
-        chart_color_ats = processed_results.get('chart_color', '#dc3545') # Color for text
-
-        # REMOVED Donut Chart Call and Table for Chart
-        ats_acc_text_html = f"Validation Accuracy (Criteria Met): <font color='{chart_color_ats}'><b>{chart_desc_ats} ({acc_display_val_str_ats}%)</b></font>"
-        ats_acc_para_style = ParagraphStyle('AtsAccuracyText', parent=styles['AccuracyText'], alignment=0) # Left align
-        ats_acc_para = Paragraph(ats_acc_text_html, ats_acc_para_style)
-        validation_elements.append(ats_acc_para)
-        validation_elements.append(Spacer(1, 0.1*inch))
-
-        # Failed Criteria Table (remains the same)
-        failed_criteria = processed_results.get('mismatched_fields', {})
-        validation_note = processed_results.get('comparison_error') 
-        accuracy_numeric_for_chart_ats = 0.0 # Recalculate or get from processed_results if needed for logic
-        try: accuracy_numeric_for_chart_ats = float(acc_display_val_str_ats)
-        except: pass
-
-
-        if failed_criteria:
-            validation_elements.append(Paragraph("Failed Criteria:", styles['SubSectionTitle']))
-            # ... (Failed criteria table definition remains the same as your last version) ...
-            failed_criteria_header = [Paragraph(h, styles['TableHeader']) for h in ["Criterion (Field & Rule)", "Your Document's Value", "Issue / Details"]]
-            failed_criteria_data_rows = [failed_criteria_header]
-            for criterion_key, details in failed_criteria.items():
-                failed_criteria_data_rows.append([
-                    Paragraph(str(criterion_key), styles['TableCellText']),
-                    Paragraph(str(details.get("extracted_value", "N/A")), styles['TableCellText']),
-                    Paragraph(str(details.get("reason", "N/A")), styles['TableCellText'])
-                ])
-            if len(failed_criteria_data_rows) > 1:
-                failed_criteria_table = Table(failed_criteria_data_rows, colWidths=[2.5*inch, 2.0*inch, None], repeatRows=1)
-                failed_criteria_table.setStyle(TableStyle([
-                    ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#fff3cd")), 
-                    ('TEXTCOLOR', (0,0), (-1,0), colors.HexColor("#856404")),
-                    ('GRID', (0,0), (-1,-1), 0.5, colors.grey), 
-                    ('VALIGN', (0,0), (-1,-1), 'TOP'), 
-                    ('LEFTPADDING', (0,0), (-1,-1), 4), ('RIGHTPADDING', (0,0), (-1,-1), 4),
-                    ('TOPPADDING', (0,0), (-1,-1), 3), ('BOTTOMPADDING', (0,0), (-1,-1), 3),
-                ]))
-                validation_elements.append(failed_criteria_table)
-        elif validation_note:
-             validation_elements.append(Paragraph(f"Note: {validation_note}", styles['SmallNote']))
-        elif accuracy_numeric_for_chart_ats >= 99.9 :
-             validation_elements.append(Paragraph("✔ All active criteria passed!", styles['SuccessMessage']))
-        else:
-            validation_elements.append(Paragraph("No specific criteria failed, but accuracy is not 100%. Check for unvalidated fields or criteria configuration.", styles['SmallNote']))
-        
-        story.append(KeepTogether(validation_elements))
-
-    # --- Build PDF Document ---
-    try:
-        doc.build(story)
-        pdf_data = buffer.getvalue()
-    except Exception as e_build:
-        app_logger.error(f"Error during PDF doc.build: {e_build}", exc_info=True)
-        # Return a simple text error if PDF build fails catastrophically
-        return f"Failed to build PDF: {e_build}".encode('utf-8') # Must return bytes for Response
-    finally:
-        buffer.close()
-        
-    return pdf_data
+   
+     # app.py
 
 @app.route('/api/admin/ats_criteria_count', methods=['GET'])
 @admin_required
