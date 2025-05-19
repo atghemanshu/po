@@ -1,0 +1,24 @@
+services:
+  - type: web # Or 'pserv' for a private service if not web-facing
+    name: your-service-name # Match your Render service name
+    env: python
+    plan: free # Or your chosen plan
+    buildCommand: "pip install -r requirements.txt && chmod +x ./initialize_app.sh && ./initialize_app.sh" # Your existing build command, then add initialization
+    startCommand: "gunicorn app:app"
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.5" # Or your desired Python version supported by Render & your packages
+      - key: SUPABASE_URL
+        fromSecret: SUPABASE_URL_SECRET_NAME # Assuming you set these as secrets
+      - key: SUPABASE_KEY
+        fromSecret: SUPABASE_KEY_SECRET_NAME
+      - key: SECRET_KEY
+        fromSecret: FLASK_SECRET_KEY_SECRET_NAME
+      - key: OCR_SPACE_API_KEY
+        fromSecret: OCR_API_KEY_SECRET_NAME
+    # Add this section for system packages:
+    buildSystemPackages: # This key might vary, check Render docs for "system packages" or "apt packages"
+      - libreoffice-writer # Installs LibreOffice Writer, which includes soffice
+      - libreoffice-common # Often needed as well
+      # You might need other related packages depending on the minimal install.
+      # Start with these and see if `docx2pdf` works.
