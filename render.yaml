@@ -1,15 +1,30 @@
 services:
-  - type: web
-    name: your-service-name 
-    env: python
-    pythonVersion: "3.11"
-    systemPackages:
-      - name: libreoffice-writer # For DOCX
-      - name: libreoffice-calc # If you ever need spreadsheet conversion
-      - name: libreoffice-impress # For presentations
-      - name: libreoffice-common
-      - name: unoconv # Install the unoconv utility script itself
-      # - name: fonts-liberation # Recommended for good font compatibility
-    buildCommand: "pip install --upgrade pip && pip install -r requirements.txt"
-    startCommand: "gunicorn app:app --timeout 120"
-    # ... envVars ...
+- type: web
+  name: po
+  runtime: python
+  pythonVersion: "3.11" # Explicitly set
+  repo: https://github.com/atghemanshu/po
+  plan: free
+  region: virginia
+  
+  packages: # Key for system packages
+    - name: libreoffice-writer
+    - name: libreoffice-common
+    - name: fonts-liberation
+
+  buildCommand: "pip install --upgrade pip && pip install -r requirements.txt"
+  startCommand: "gunicorn app:app --timeout 120 --workers 1" # Added timeout and single worker
+  autoDeployTrigger: commit
+  envVars:
+    # ... your envVars referencing secrets from Render dashboard ...
+    - key: PYTHON_VERSION
+      value: "3.11"
+    - key: SUPABASE_URL
+      fromSecret: true
+    - key: SUPABASE_KEY
+      fromSecret: true
+    - key: SECRET_KEY
+      fromSecret: true
+    - key: OCR_SPACE_API_KEY
+      fromSecret: true
+version: "1"
