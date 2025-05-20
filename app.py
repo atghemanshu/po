@@ -247,7 +247,7 @@ def original_extract_text_from_docx(file_path): # Renamed to avoid confusion dur
         print(f"Error during direct DOCX text extraction: {e}") # Use print or app.logger
         return f"Error extracting text directly from DOCX: {e}"
     
-def extract_text_from_file(temp_file_path, filename): # temp_file_path is the path to the saved uploaded file
+def extract_text_from_file(temp_file_path, filename):
     _, file_extension = os.path.splitext(filename)
     file_extension = file_extension.lower()
 
@@ -256,55 +256,28 @@ def extract_text_from_file(temp_file_path, filename): # temp_file_path is the pa
     elif file_extension == '.pdf':
         return extract_text_from_pdf(temp_file_path)
     elif file_extension == '.docx':
-        print(f"INFO: Processing DOCX file: {filename}")
-        pdf_output_path = temp_file_path + ".pdf" # Create a new path for the PDF
-        
-        # --- MODIFICATION STARTS HERE ---
-        com_initialized_this_call = False # Flag to ensure we only uninitialize if this specific call initialized COM
+        print(f"INFO: Processing DOCX file via LibreOffice: {filename}")
+        pdf_output_path = temp_file_path + ".pdf"
         try:
-            if pythoncom and platform.system() == "Windows":
-                try:
-                    # COINIT_APARTMENTTHREADED is typically required for Office automation / UI components.
-                    pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
-                    com_initialized_this_call = True
-                    print(f"INFO: CoInitializeEx(COINIT_APARTMENTTHREADED) called for DOCX conversion of '{filename}'.")
-                except pythoncom.com_error as e:
-                    # This can happen if COM is already initialized, possibly with a different concurrency model.
-                    # RPC_E_CHANGED_MODE (0x80010106) means it's already initialized differently.
-                    # S_FALSE (1) means it's already initialized with the same mode (not an error pythoncom raises).
-                    # If an exception occurs, we assume this call didn't establish initialization,
-                    # so com_initialized_this_call remains False.
-                    print(f"WARNING: CoInitializeEx for '{filename}' reported an issue (HRESULT: {e.hresult}, Details: {e.strerror}). Conversion will proceed; existing COM state might be incompatible or already suitable.")
-                    # com_initialized_this_call remains False, so CoUninitialize won't be called by this scope's finally.
-
-            print(f"INFO: Attempting to convert '{filename}' to PDF at '{pdf_output_path}'...")
-            convert(temp_file_path, pdf_output_path) # temp_file_path is the input DOCX
+            # docx2pdf on Linux (inside Docker with LibreOffice) will use soffice
+            convert(temp_file_path, pdf_output_path) 
             
             if os.path.exists(pdf_output_path):
-                print(f"INFO: DOCX successfully converted to PDF. Extracting text from PDF: {pdf_output_path}")
+                print(f"INFO: DOCX successfully converted to PDF using LibreOffice. Extracting text from: {pdf_output_path}")
                 text_from_pdf = extract_text_from_pdf(pdf_output_path)
                 try:
-                    os.remove(pdf_output_path) # Clean up the temporary PDF
-                    print(f"INFO: Temporary PDF '{pdf_output_path}' removed.")
+                    os.remove(pdf_output_path)
                 except OSError as e_os:
                     print(f"WARNING: Could not remove temporary PDF '{pdf_output_path}': {e_os}")
                 return text_from_pdf
             else:
-                print(f"WARNING: DOCX to PDF conversion for '{filename}' did not create output file. Falling back to direct DOCX extraction.")
-                return original_extract_text_from_docx(temp_file_path) # Use original direct method
+                print(f"WARNING: DOCX to PDF conversion (LibreOffice) did not create output file for '{filename}'. Falling back to direct.")
+                return original_extract_text_from_docx(temp_file_path)
 
         except Exception as e_convert:
-            print(f"ERROR: Failed to convert DOCX '{filename}' to PDF or process it: {e_convert}")
+            print(f"ERROR: Failed to convert DOCX '{filename}' to PDF using LibreOffice: {e_convert}")
             print(f"INFO: Falling back to direct text extraction from DOCX for '{filename}'.")
-            return original_extract_text_from_docx(temp_file_path) 
-        finally:
-            if com_initialized_this_call and pythoncom and platform.system() == "Windows":
-                try:
-                    pythoncom.CoUninitialize()
-                    print(f"INFO: CoUninitialize called for DOCX conversion of '{filename}'.")
-                except Exception as e_uninit:
-                    print(f"ERROR: CoUninitialize failed for '{filename}': {e_uninit}")
-        # --- MODIFICATION ENDS HERE ---
+            return original_extract_text_from_docx(temp_file_path)
             
     return f"Error: Unsupported file format '{file_extension}'."
 
