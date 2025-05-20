@@ -247,7 +247,7 @@ def original_extract_text_from_docx(file_path): # Renamed to avoid confusion dur
         print(f"Error during direct DOCX text extraction: {e}") # Use print or app.logger
         return f"Error extracting text directly from DOCX: {e}"
     
-def extract_text_from_file(temp_file_path, filename):
+def extract_text_from_file(temp_file_path, filename): # temp_file_path is the path to the saved uploaded file
     _, file_extension = os.path.splitext(filename)
     file_extension = file_extension.lower()
 
@@ -256,28 +256,55 @@ def extract_text_from_file(temp_file_path, filename):
     elif file_extension == '.pdf':
         return extract_text_from_pdf(temp_file_path)
     elif file_extension == '.docx':
-        print(f"INFO: Processing DOCX file via LibreOffice: {filename}")
-        pdf_output_path = temp_file_path + ".pdf"
+        print(f"INFO: Processing DOCX file: {filename}")
+        pdf_output_path = temp_file_path + ".pdf" # Create a new path for the PDF
+        
+        # --- MODIFICATION STARTS HERE ---
+        com_initialized_this_call = False # Flag to ensure we only uninitialize if this specific call initialized COM
         try:
-            # docx2pdf on Linux (inside Docker with LibreOffice) will use soffice
-            convert(temp_file_path, pdf_output_path) 
+            if pythoncom and platform.system() == "Windows":
+                try:
+                    # COINIT_APARTMENTTHREADED is typically required for Office automation / UI components.
+                    pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
+                    com_initialized_this_call = True
+                    print(f"INFO: CoInitializeEx(COINIT_APARTMENTTHREADED) called for DOCX conversion of '{filename}'.")
+                except pythoncom.com_error as e:
+                    # This can happen if COM is already initialized, possibly with a different concurrency model.
+                    # RPC_E_CHANGED_MODE (0x80010106) means it's already initialized differently.
+                    # S_FALSE (1) means it's already initialized with the same mode (not an error pythoncom raises).
+                    # If an exception occurs, we assume this call didn't establish initialization,
+                    # so com_initialized_this_call remains False.
+                    print(f"WARNING: CoInitializeEx for '{filename}' reported an issue (HRESULT: {e.hresult}, Details: {e.strerror}). Conversion will proceed; existing COM state might be incompatible or already suitable.")
+                    # com_initialized_this_call remains False, so CoUninitialize won't be called by this scope's finally.
+
+            print(f"INFO: Attempting to convert '{filename}' to PDF at '{pdf_output_path}'...")
+            convert(temp_file_path, pdf_output_path) # temp_file_path is the input DOCX
             
             if os.path.exists(pdf_output_path):
-                print(f"INFO: DOCX successfully converted to PDF using LibreOffice. Extracting text from: {pdf_output_path}")
+                print(f"INFO: DOCX successfully converted to PDF. Extracting text from PDF: {pdf_output_path}")
                 text_from_pdf = extract_text_from_pdf(pdf_output_path)
                 try:
-                    os.remove(pdf_output_path)
+                    os.remove(pdf_output_path) # Clean up the temporary PDF
+                    print(f"INFO: Temporary PDF '{pdf_output_path}' removed.")
                 except OSError as e_os:
                     print(f"WARNING: Could not remove temporary PDF '{pdf_output_path}': {e_os}")
                 return text_from_pdf
             else:
-                print(f"WARNING: DOCX to PDF conversion (LibreOffice) did not create output file for '{filename}'. Falling back to direct.")
-                return original_extract_text_from_docx(temp_file_path)
+                print(f"WARNING: DOCX to PDF conversion for '{filename}' did not create output file. Falling back to direct DOCX extraction.")
+                return original_extract_text_from_docx(temp_file_path) # Use original direct method
 
         except Exception as e_convert:
-            print(f"ERROR: Failed to convert DOCX '{filename}' to PDF using LibreOffice: {e_convert}")
+            print(f"ERROR: Failed to convert DOCX '{filename}' to PDF or process it: {e_convert}")
             print(f"INFO: Falling back to direct text extraction from DOCX for '{filename}'.")
-            return original_extract_text_from_docx(temp_file_path)
+            return original_extract_text_from_docx(temp_file_path) 
+        finally:
+            if com_initialized_this_call and pythoncom and platform.system() == "Windows":
+                try:
+                    pythoncom.CoUninitialize()
+                    print(f"INFO: CoUninitialize called for DOCX conversion of '{filename}'.")
+                except Exception as e_uninit:
+                    print(f"ERROR: CoUninitialize failed for '{filename}': {e_uninit}")
+        # --- MODIFICATION ENDS HERE ---
             
     return f"Error: Unsupported file format '{file_extension}'."
 
@@ -1948,7 +1975,8 @@ def create_accuracy_donut_chart(accuracy_percent_numeric,
     return drawing
 
 # --- Main PDF Generation Function ---
-def generate_pdf_report(processed_results, filename_key, doc_type, app_logger): # Added app_logger
+def generate_pdf_report(processed_results, filename_key, doc_type, app_logger):
+    # global PO_KEY_COMPARISON_FIELDS # This line can be removed, not needed
     
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter,
@@ -1956,17 +1984,17 @@ def generate_pdf_report(processed_results, filename_key, doc_type, app_logger): 
                             topMargin=0.75*inch, bottomMargin=0.75*inch)
     styles = getSampleStyleSheet()
     
-    # --- Custom Styles ---
+    # --- Custom Styles (keep these as they are used by other elements) ---
     styles.add(ParagraphStyle(name='MainReportTitle', parent=styles['Normal'], fontSize=14, alignment=0, spaceBottom=10, leading=16, fontName='Helvetica-Bold'))
     styles.add(ParagraphStyle(name='SectionTitle', parent=styles['Normal'], fontSize=11, fontName='Helvetica-Bold', spaceBefore=10, spaceBottom=6, leading=14, alignment=0))
     styles.add(ParagraphStyle(name='ComparisonSectionTitle', parent=styles['Normal'], fontSize=12, fontName='Helvetica-Bold', spaceBefore=12, spaceBottom=6, leading=14))
     styles.add(ParagraphStyle(name='SubSectionTitle', parent=styles['Normal'], fontSize=10, fontName='Helvetica-Bold', spaceBefore=8, spaceBottom=4, leading=12))
-    styles.add(ParagraphStyle(name='AccuracyText', parent=styles['Normal'], fontSize=9, leading=12, alignment=0))
+    styles.add(ParagraphStyle(name='AccuracyText', parent=styles['Normal'], fontSize=9, leading=12, alignment=0)) # Still used for accuracy text
     styles.add(ParagraphStyle(name='SmallNote', parent=styles['Normal'], fontSize=8, textColor=colors.dimgrey, leading=10))
     styles.add(ParagraphStyle(name='SuccessMessage', parent=styles['Normal'], fontSize=9, textColor=colors.HexColor("#155724"), fontName='Helvetica-Bold', leading=12))
     styles.add(ParagraphStyle(name='DataItemKey', parent=styles['Normal'], fontSize=9, fontName='Helvetica-Bold', leading=11))
-    styles.add(ParagraphStyle(name='DataItemValue', parent=styles['Normal'], fontSize=9, leading=11, wordWrap='CJK', spaceLeft=5)) # Ensure wordWrap is effective
-    styles.add(ParagraphStyle(name='TableHeader', parent=styles['Normal'], fontSize=8, fontName='Helvetica-Bold', alignment=1, textColor=colors.black)) # Centered header, black text
+    styles.add(ParagraphStyle(name='DataItemValue', parent=styles['Normal'], fontSize=9, leading=11, wordWrap='CJK', spaceLeft=5))
+    styles.add(ParagraphStyle(name='TableHeader', parent=styles['Normal'], fontSize=8, fontName='Helvetica-Bold', alignment=1, textColor=colors.black))
     styles.add(ParagraphStyle(name='TableCellText', parent=styles['Normal'], fontSize=8, leading=10, wordWrap='CJK'))
     styles.add(ParagraphStyle(name='MismatchTableHeader', parent=styles['Normal'], fontSize=9, fontName='Helvetica-Bold',textColor=colors.HexColor("#721c24")))
     styles.add(ParagraphStyle(name='FailedCriteriaTableHeader', parent=styles['Normal'], fontSize=9, fontName='Helvetica-Bold', textColor=colors.HexColor("#856404")))
@@ -1977,13 +2005,14 @@ def generate_pdf_report(processed_results, filename_key, doc_type, app_logger): 
         story.append(Spacer(1, 0.1*inch))
 
     if doc_type == 'po':
-        po_field_order_for_cards = ["Order Date", "PO Number", "Phone", "Total", "Vendor"]
+        # --- PO Extracted Data and DB Data (Side-by-Side Table) ---
+        # This part remains the same as your last correct version for PO data display
+        po_field_order_for_cards = PO_FIELDS_FOR_USER_EXTRACTION # Use defined list
         left_card_flowables = [Paragraph("Extracted Data:", styles['SectionTitle'])]
-        # ... (rest of left_card_flowables population - unchanged from previous correct version)
         structured_data = processed_results.get('structured_data', {})
         if structured_data:
             for field_name in po_field_order_for_cards:
-                if field_name in structured_data:
+                if field_name in structured_data: # Display only if field exists in extracted data
                     v = str(structured_data.get(field_name, "N/A"))
                     item_data = [[Paragraph(f"{field_name}:", styles['DataItemKey']), Paragraph(v, styles['DataItemValue'])]]
                     item_table = Table(item_data, colWidths=[0.9*inch, None])
@@ -1993,10 +2022,9 @@ def generate_pdf_report(processed_results, filename_key, doc_type, app_logger): 
             left_card_flowables.append(Paragraph("No structured data extracted.", styles['SmallNote']))
 
         right_card_flowables = [Paragraph("Database Data (For Comparison):", styles['SectionTitle'])]
-        # ... (rest of right_card_flowables population - unchanged from previous correct version)
         db_record = processed_results.get('db_record_for_display', {})
         if db_record:
-            for field_name in po_field_order_for_cards:
+            for field_name in PO_KEY_COMPARISON_FIELDS: # Show only key comparison fields from DB
                 if field_name in db_record:
                     v = str(db_record.get(field_name, "N/A"))
                     item_data = [[Paragraph(f"{field_name}:", styles['DataItemKey']), Paragraph(v, styles['DataItemValue'])]]
@@ -2004,48 +2032,32 @@ def generate_pdf_report(processed_results, filename_key, doc_type, app_logger): 
                     item_table.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP'), ('LEFTPADDING',(0,0),(-1,-1),0),('BOTTOMPADDING',(0,0),(-1,-1),2)]))
                     right_card_flowables.append(item_table)
         else:
-            right_card_flowables.append(Paragraph("No database record found.", styles['SmallNote']))
+            right_card_flowables.append(Paragraph("No database record found or comparison not applicable.", styles['SmallNote']))
 
         master_data_table = Table([[left_card_flowables, right_card_flowables]], colWidths=[3.5*inch, 3.5*inch], spaceBefore=0)
         master_data_table.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP'), ('RIGHTPADDING', (0,0), (0,0), 0.15*inch), ('LEFTPADDING', (1,0), (1,0), 0.15*inch)]))
         story.append(master_data_table)
         story.append(Spacer(1, 0.15*inch))
 
+        # --- PO Comparison & Accuracy (Text Only) ---
         po_comparison_elements = []
         po_comparison_elements.append(Paragraph("PO Comparison & Accuracy:", styles['ComparisonSectionTitle']))
         
         acc_display_val_str = processed_results.get('acc_display_val', "0.0")
-        accuracy_numeric_for_chart = 0.0 # Default
-        try:
-            accuracy_numeric_for_chart = float(acc_display_val_str)
-        except (ValueError, TypeError) as e: # Catch TypeError if acc_display_val_str is None
-            app_logger.error(f"PO PDF: Could not convert acc_display_val '{acc_display_val_str}' to float. Error: {e}")
-            # acc_display_val_str might need a default if it was None
-            if acc_display_val_str is None: acc_display_val_str = "0.0"
-
-
         chart_desc = processed_results.get('chart_description', 'N/A')
-        # Make sure PO_KEY_COMPARISON_FIELDS is accessible here
+        chart_color = processed_results.get('chart_color', '#28a745') # Still useful for text color
         compared_fields_str = ", ".join(PO_KEY_COMPARISON_FIELDS) if PO_KEY_COMPARISON_FIELDS else "configured fields"
-        chart_color = processed_results.get('chart_color', '#28a745')
 
-        chart_size = 0.55 * inch
-        donut_chart = create_accuracy_donut_chart(
-            accuracy_percent_numeric=accuracy_numeric_for_chart, size_pts=chart_size, stroke_width_pts=6,
-            progress_color_hex=chart_color, font_size_pts=7,
-            text_color_hex_inside_chart="#FFFFFF" if accuracy_numeric_for_chart > 30 else "#000000"
-        )
+        # REMOVED Donut Chart Call and Table for Chart
         acc_line_html = f"Accuracy (based on: {compared_fields_str}): <font color='{chart_color}'><b>{chart_desc} ({acc_display_val_str}%)</b></font>"
         acc_para = Paragraph(acc_line_html, styles['AccuracyText'])
-        acc_display_table = Table([[donut_chart, acc_para]], colWidths=[chart_size + 0.1*inch, None])
-        acc_display_table.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'MIDDLE'), ('LEFTPADDING', (1,0), (1,0), 0.05*inch)]))
-        po_comparison_elements.append(acc_display_table)
+        po_comparison_elements.append(acc_para) # Add accuracy text directly
         po_comparison_elements.append(Spacer(1, 0.05*inch))
 
-        # ... (PO Mismatch logic and table - unchanged from previous correct version)
+        # PO Mismatch Table (remains the same)
         mismatched = processed_results.get('mismatched_fields', {})
         comp_error = processed_results.get('comparison_error')
-        acc_val_logic = processed_results.get('acc_calc_val', 0.0)
+        acc_val_logic = processed_results.get('acc_calc_val', 0.0) # Get the numeric accuracy
         if not mismatched and acc_val_logic >= 99.9:
             success_html = "<font color='#155724'><b>✔ All compared fields matched!</b></font>"
             po_comparison_elements.append(Paragraph(success_html, styles['SuccessMessage']))
@@ -2053,6 +2065,7 @@ def generate_pdf_report(processed_results, filename_key, doc_type, app_logger): 
             po_comparison_elements.append(Paragraph(f"Note: {comp_error}", styles['SmallNote']))
         elif not mismatched and acc_val_logic < 99.9:
              po_comparison_elements.append(Paragraph("Note: Accuracy affected by empty/missing or normalized fields.", styles['SmallNote']))
+        
         if mismatched:
             mismatch_data = [[Paragraph(h, styles['TableHeader']) for h in ["Field", "Database Value", "Extracted Value"]]]
             for f, vals in mismatched.items():
@@ -2066,32 +2079,31 @@ def generate_pdf_report(processed_results, filename_key, doc_type, app_logger): 
                 ('TOPPADDING', (0,0), (-1,-1), 2), ('BOTTOMPADDING', (0,0), (-1,-1), 2),
             ]))
             po_comparison_elements.append(t_mismatch)
-            if comp_error:
+            if comp_error and not (not mismatched and acc_val_logic < 99.9): # Only show comp_error if not already covered by the "empty fields" note
                 po_comparison_elements.append(Spacer(1,0.05*inch))
                 po_comparison_elements.append(Paragraph(f"Note: {comp_error}", styles['SmallNote']))
         story.append(KeepTogether(po_comparison_elements))
 
     elif doc_type == 'ats':
+        # --- ATS Extracted Data ---
         story.append(Paragraph("Extracted Data:", styles['SectionTitle']))
         structured_data_ats = processed_results.get('structured_data', {})
         if structured_data_ats:
-            ats_field_order = ATS_FIELDS_FOR_USER_EXTRACTION # Use the global list
+            ats_field_order = ATS_FIELDS_FOR_USER_EXTRACTION
             data_items_for_ats = []
             for field_name in ats_field_order:
                 if field_name in structured_data_ats:
                     value_text = str(structured_data_ats.get(field_name, "N/A"))
-                    # Create a two-column layout for each item: Label | Value
                     item_para_key = Paragraph(f"{field_name}:", styles['DataItemKey'])
                     item_para_val = Paragraph(value_text, styles['DataItemValue'])
                     data_items_for_ats.append([item_para_key, item_para_val])
             
             if data_items_for_ats:
-                # Table to display extracted data items neatly
-                extracted_data_table = Table(data_items_for_ats, colWidths=[1.5*inch, None]) # Adjust colWidths as needed
+                extracted_data_table = Table(data_items_for_ats, colWidths=[1.5*inch, None])
                 extracted_data_table.setStyle(TableStyle([
                     ('VALIGN', (0,0), (-1,-1), 'TOP'),
                     ('LEFTPADDING',(0,0),(-1,-1),0),
-                    ('BOTTOMPADDING',(0,0),(-1,-1),3) # Small gap between items
+                    ('BOTTOMPADDING',(0,0),(-1,-1),3)
                 ]))
                 story.append(extracted_data_table)
             else:
@@ -2099,84 +2111,73 @@ def generate_pdf_report(processed_results, filename_key, doc_type, app_logger): 
         else:
             story.append(Paragraph("No structured data extracted.", styles['SmallNote']))
         
-        story.append(Spacer(1, 0.2*inch)) # Space before validation section
+        story.append(Spacer(1, 0.2*inch))
 
-        # --- ATS Criteria Validation Section ---
-        validation_elements = [] # Use KeepTogether for this whole block
-        validation_elements.append(Paragraph("ATS Criteria Validation:", styles['ComparisonSectionTitle'])) # Use a more prominent title
+        # --- ATS Criteria Validation (Text Only) ---
+        validation_elements = []
+        validation_elements.append(Paragraph("ATS Criteria Validation:", styles['ComparisonSectionTitle']))
         
-        # Donut Chart and Accuracy Text (side-by-side)
         acc_display_val_str_ats = processed_results.get('acc_display_val', "0.0")
-        accuracy_numeric_for_chart_ats = 0.0
-        try:
-            accuracy_numeric_for_chart_ats = float(acc_display_val_str_ats)
-        except (ValueError, TypeError):
-            app_logger.error(f"ATS PDF: Could not convert acc_display_val '{acc_display_val_str_ats}' to float.")
-            if acc_display_val_str_ats is None: acc_display_val_str_ats = "0.0"
+        chart_desc_ats = processed_results.get('chart_description', 'N/A') # Description like "Low", "Good"
+        chart_color_ats = processed_results.get('chart_color', '#dc3545') # Color for text
 
-        chart_desc_ats = processed_results.get('chart_description', 'N/A')
-        chart_color_ats = processed_results.get('chart_color', '#dc3545') # Default to bad if not found
-        chart_size_ats = 0.65 * inch # Consistent small chart size
-        
-        donut_chart_ats = create_accuracy_donut_chart(
-            accuracy_percent_numeric=accuracy_numeric_for_chart_ats, 
-            size_pts=chart_size_ats, 
-            stroke_width_pts=7, # Slightly thinner stroke for smaller chart
-            progress_color_hex=chart_color_ats, 
-            font_size_pts=7,  # Smaller font for smaller chart
-            text_color_hex_inside_chart="#FFFFFF" if accuracy_numeric_for_chart_ats > 30 else "#000000"
-        )
-        
+        # REMOVED Donut Chart Call and Table for Chart
         ats_acc_text_html = f"Validation Accuracy (Criteria Met): <font color='{chart_color_ats}'><b>{chart_desc_ats} ({acc_display_val_str_ats}%)</b></font>"
-        ats_acc_para = Paragraph(ats_acc_text_html, styles['AccuracyText'])
-        
-        # Table to place chart and text side-by-side
-        acc_chart_table_data = [[donut_chart_ats, ats_acc_para]]
-        acc_chart_table = Table(acc_chart_table_data, colWidths=[chart_size_ats + 0.1*inch, None])
-        acc_chart_table.setStyle(TableStyle([
-            ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-            ('LEFTPADDING', (1,0), (1,0), 0.1*inch) # Space between chart and text
-        ]))
-        validation_elements.append(acc_chart_table)
+        ats_acc_para_style = ParagraphStyle('AtsAccuracyText', parent=styles['AccuracyText'], alignment=0) # Left align
+        ats_acc_para = Paragraph(ats_acc_text_html, ats_acc_para_style)
+        validation_elements.append(ats_acc_para)
         validation_elements.append(Spacer(1, 0.1*inch))
 
-        # Failed Criteria Table
+        # Failed Criteria Table (remains the same)
         failed_criteria = processed_results.get('mismatched_fields', {})
-        validation_note = processed_results.get('comparison_error') # e.g., "No active criteria"
+        validation_note = processed_results.get('comparison_error') 
+        accuracy_numeric_for_chart_ats = 0.0 # Recalculate or get from processed_results if needed for logic
+        try: accuracy_numeric_for_chart_ats = float(acc_display_val_str_ats)
+        except: pass
+
 
         if failed_criteria:
-            validation_elements.append(Paragraph("Failed Criteria:", styles['SubSectionTitle'])) # Use SubSectionTitle
+            validation_elements.append(Paragraph("Failed Criteria:", styles['SubSectionTitle']))
+            # ... (Failed criteria table definition remains the same as your last version) ...
             failed_criteria_header = [Paragraph(h, styles['TableHeader']) for h in ["Criterion (Field & Rule)", "Your Document's Value", "Issue / Details"]]
-            failed_criteria_data = [failed_criteria_header]
+            failed_criteria_data_rows = [failed_criteria_header]
             for criterion_key, details in failed_criteria.items():
-                failed_criteria_data.append([
+                failed_criteria_data_rows.append([
                     Paragraph(str(criterion_key), styles['TableCellText']),
                     Paragraph(str(details.get("extracted_value", "N/A")), styles['TableCellText']),
                     Paragraph(str(details.get("reason", "N/A")), styles['TableCellText'])
                 ])
-            failed_criteria_table = Table(failed_criteria_data, colWidths=[2.5*inch, 2.0*inch, None], repeatRows=1) # Adjust colWidths
-            failed_criteria_table.setStyle(TableStyle([
-                ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#fff3cd")), # Light yellow for warning-like header
-                ('TEXTCOLOR', (0,0), (-1,0), colors.HexColor("#856404")),
-                ('GRID', (0,0), (-1,-1), 0.5, colors.grey), 
-                ('VALIGN', (0,0), (-1,-1), 'TOP'), # Top align for potentially multi-line cell content
-                ('LEFTPADDING', (0,0), (-1,-1), 4), ('RIGHTPADDING', (0,0), (-1,-1), 4),
-                ('TOPPADDING', (0,0), (-1,-1), 3), ('BOTTOMPADDING', (0,0), (-1,-1), 3),
-            ]))
-            validation_elements.append(failed_criteria_table)
-        elif validation_note: # If no failed criteria, but there's a note (e.g., "No active criteria")
+            if len(failed_criteria_data_rows) > 1:
+                failed_criteria_table = Table(failed_criteria_data_rows, colWidths=[2.5*inch, 2.0*inch, None], repeatRows=1)
+                failed_criteria_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#fff3cd")), 
+                    ('TEXTCOLOR', (0,0), (-1,0), colors.HexColor("#856404")),
+                    ('GRID', (0,0), (-1,-1), 0.5, colors.grey), 
+                    ('VALIGN', (0,0), (-1,-1), 'TOP'), 
+                    ('LEFTPADDING', (0,0), (-1,-1), 4), ('RIGHTPADDING', (0,0), (-1,-1), 4),
+                    ('TOPPADDING', (0,0), (-1,-1), 3), ('BOTTOMPADDING', (0,0), (-1,-1), 3),
+                ]))
+                validation_elements.append(failed_criteria_table)
+        elif validation_note:
              validation_elements.append(Paragraph(f"Note: {validation_note}", styles['SmallNote']))
-        elif accuracy_numeric_for_chart_ats >= 99.9 : # All criteria passed
+        elif accuracy_numeric_for_chart_ats >= 99.9 :
              validation_elements.append(Paragraph("✔ All active criteria passed!", styles['SuccessMessage']))
-        else: # No failed criteria listed, accuracy not 100%, no specific note from backend
+        else:
             validation_elements.append(Paragraph("No specific criteria failed, but accuracy is not 100%. Check for unvalidated fields or criteria configuration.", styles['SmallNote']))
+        
+        story.append(KeepTogether(validation_elements))
 
-
-        story.append(KeepTogether(validation_elements)) # Keep validation block together
-
-    doc.build(story)
-    pdf_data = buffer.getvalue()
-    buffer.close()
+    # --- Build PDF Document ---
+    try:
+        doc.build(story)
+        pdf_data = buffer.getvalue()
+    except Exception as e_build:
+        app_logger.error(f"Error during PDF doc.build: {e_build}", exc_info=True)
+        # Return a simple text error if PDF build fails catastrophically
+        return f"Failed to build PDF: {e_build}".encode('utf-8') # Must return bytes for Response
+    finally:
+        buffer.close()
+        
     return pdf_data
 
 @app.route('/api/admin/ats_criteria_count', methods=['GET'])
