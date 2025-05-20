@@ -22,6 +22,7 @@ from werkzeug.security import generate_password_hash, check_password_hash # Stil
 from pdfminer.high_level import extract_text as pdf_extract_text
 from docx import Document as DocxDocument
 import requests
+import subprocess
 
 from io import BytesIO
 from reportlab.platypus import (
@@ -247,7 +248,7 @@ def original_extract_text_from_docx(file_path): # Renamed to avoid confusion dur
         print(f"Error during direct DOCX text extraction: {e}") # Use print or app.logger
         return f"Error extracting text directly from DOCX: {e}"
     
-def extract_text_from_file(temp_file_path, filename): # temp_file_path is the path to the saved uploaded file
+def extract_text_from_file(temp_file_path, filename):
     _, file_extension = os.path.splitext(filename)
     file_extension = file_extension.lower()
 
@@ -256,55 +257,90 @@ def extract_text_from_file(temp_file_path, filename): # temp_file_path is the pa
     elif file_extension == '.pdf':
         return extract_text_from_pdf(temp_file_path)
     elif file_extension == '.docx':
-        print(f"INFO: Processing DOCX file: {filename}")
-        pdf_output_path = temp_file_path + ".pdf" # Create a new path for the PDF
+        # Check if running on Linux (which Render's Docker environment is)
+        if platform.system() == "Linux":
+            print(f"INFO [Linux Environment]: Processing DOCX file via direct soffice call: {filename}")
+            pdf_output_path_linux = temp_file_path + ".pdf" # Path for PDF output
+            temp_dir_linux = os.path.dirname(temp_file_path) # Directory for soffice output
+
+            # This is the base name of the input file without extension.
+            # soffice --outdir . input.docx will create input.pdf
+            base_name_no_ext_linux = os.path.splitext(os.path.basename(temp_file_path))[0]
+            expected_pdf_output_by_soffice_linux = os.path.join(temp_dir_linux, base_name_no_ext_linux + ".pdf")
+
+            try:
+                cmd = [
+                    'soffice', '--headless', '--invisible', '--nocrashreport', '--nodefault', 
+                    '--nofirststartwizard', '--nologo', '--norestore',
+                    '--convert-to', 'pdf', 
+                    '--outdir', temp_dir_linux, 
+                    temp_file_path
+                ]
+                print(f"INFO: Executing soffice command: {' '.join(cmd)}")
+                
+                process = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+
+                if process.returncode == 0 and os.path.exists(expected_pdf_output_by_soffice_linux):
+                    print(f"INFO: soffice conversion successful. Output: {expected_pdf_output_by_soffice_linux}")
+                    if process.stdout: print(f"INFO: soffice stdout: {process.stdout}")
+                    if process.stderr: print(f"INFO: soffice stderr: {process.stderr}") # Check stderr even on success for warnings
+                    
+                    text_from_pdf = extract_text_from_pdf(expected_pdf_output_by_soffice_linux)
+                    try:
+                        os.remove(expected_pdf_output_by_soffice_linux)
+                    except OSError as e_os:
+                        print(f"WARNING: Could not remove soffice-converted PDF '{expected_pdf_output_by_soffice_linux}': {e_os}")
+                    return text_from_pdf
+                else:
+                    print(f"ERROR: soffice conversion failed for '{filename}'.")
+                    print(f"  Return Code: {process.returncode}")
+                    print(f"  stdout: {process.stdout}")
+                    print(f"  stderr: {process.stderr}")
+                    print(f"  Expected PDF path '{expected_pdf_output_by_soffice_linux}' exists: {os.path.exists(expected_pdf_output_by_soffice_linux)}")
+                    return original_extract_text_from_docx(temp_file_path) # Fallback
+
+            except FileNotFoundError: # This would happen if 'soffice' command is not found
+                print("ERROR: soffice command not found. Is LibreOffice installed correctly and in PATH inside Docker?")
+                return original_extract_text_from_docx(temp_file_path)
+            except subprocess.TimeoutExpired:
+                print(f"ERROR: soffice conversion timed out for {filename}.")
+                return original_extract_text_from_docx(temp_file_path)
+            except Exception as e_soffice:
+                print(f"ERROR: Exception during direct soffice call for '{filename}': {type(e_soffice).__name__} - {e_soffice}")
+                return original_extract_text_from_docx(temp_file_path)
         
-        # --- MODIFICATION STARTS HERE ---
-        com_initialized_this_call = False # Flag to ensure we only uninitialize if this specific call initialized COM
-        try:
-            if pythoncom and platform.system() == "Windows":
-                try:
-                    # COINIT_APARTMENTTHREADED is typically required for Office automation / UI components.
-                    pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
-                    com_initialized_this_call = True
-                    print(f"INFO: CoInitializeEx(COINIT_APARTMENTTHREADED) called for DOCX conversion of '{filename}'.")
-                except pythoncom.com_error as e:
-                    # This can happen if COM is already initialized, possibly with a different concurrency model.
-                    # RPC_E_CHANGED_MODE (0x80010106) means it's already initialized differently.
-                    # S_FALSE (1) means it's already initialized with the same mode (not an error pythoncom raises).
-                    # If an exception occurs, we assume this call didn't establish initialization,
-                    # so com_initialized_this_call remains False.
-                    print(f"WARNING: CoInitializeEx for '{filename}' reported an issue (HRESULT: {e.hresult}, Details: {e.strerror}). Conversion will proceed; existing COM state might be incompatible or already suitable.")
-                    # com_initialized_this_call remains False, so CoUninitialize won't be called by this scope's finally.
-
-            print(f"INFO: Attempting to convert '{filename}' to PDF at '{pdf_output_path}'...")
-            convert(temp_file_path, pdf_output_path) # temp_file_path is the input DOCX
-            
-            if os.path.exists(pdf_output_path):
-                print(f"INFO: DOCX successfully converted to PDF. Extracting text from PDF: {pdf_output_path}")
-                text_from_pdf = extract_text_from_pdf(pdf_output_path)
-                try:
-                    os.remove(pdf_output_path) # Clean up the temporary PDF
-                    print(f"INFO: Temporary PDF '{pdf_output_path}' removed.")
-                except OSError as e_os:
-                    print(f"WARNING: Could not remove temporary PDF '{pdf_output_path}': {e_os}")
-                return text_from_pdf
-            else:
-                print(f"WARNING: DOCX to PDF conversion for '{filename}' did not create output file. Falling back to direct DOCX extraction.")
-                return original_extract_text_from_docx(temp_file_path) # Use original direct method
-
-        except Exception as e_convert:
-            print(f"ERROR: Failed to convert DOCX '{filename}' to PDF or process it: {e_convert}")
-            print(f"INFO: Falling back to direct text extraction from DOCX for '{filename}'.")
-            return original_extract_text_from_docx(temp_file_path) 
-        finally:
-            if com_initialized_this_call and pythoncom and platform.system() == "Windows":
-                try:
+        elif platform.system() == "Windows": # Your local Windows logic
+            print(f"INFO [Windows Environment]: Processing DOCX file: {filename}")
+            pdf_output_path_windows = temp_file_path + ".pdf"
+            com_initialized_this_call = False
+            try:
+                if pythoncom: # Ensure pythoncom was imported successfully
+                    try:
+                        pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
+                        com_initialized_this_call = True
+                    except pythoncom.com_error as e_com: # More specific exception
+                        print(f"WARNING: Local CoInitializeEx for '{filename}' reported an issue: {e_com}")
+                
+                print(f"INFO: Attempting local docx2pdf conversion (using MS Word COM) for '{filename}'...")
+                from docx2pdf import convert as docx2pdf_local_convert # Local import just in case
+                docx2pdf_local_convert(temp_file_path, pdf_output_path_windows)
+                if os.path.exists(pdf_output_path_windows):
+                    print("INFO: Local docx2pdf conversion successful. Extracting text.")
+                    text_from_local_pdf = extract_text_from_pdf(pdf_output_path_windows)
+                    os.remove(pdf_output_path_windows)
+                    return text_from_local_pdf
+                else:
+                    print("WARNING: Local docx2pdf (MS Word COM) did not create output file.")
+                    return original_extract_text_from_docx(temp_file_path) # Fallback
+            except Exception as e_local_convert:
+                print(f"ERROR: Local docx2pdf (MS Word COM) conversion failed for '{filename}': {e_local_convert}")
+                return original_extract_text_from_docx(temp_file_path) # Fallback
+            finally:
+                if com_initialized_this_call and pythoncom:
                     pythoncom.CoUninitialize()
-                    print(f"INFO: CoUninitialize called for DOCX conversion of '{filename}'.")
-                except Exception as e_uninit:
-                    print(f"ERROR: CoUninitialize failed for '{filename}': {e_uninit}")
-        # --- MODIFICATION ENDS HERE ---
+        else: # Other OS or unforeseen case
+            print(f"INFO: Platform {platform.system()} not explicitly handled for DOCX->PDF. Falling back to direct DOCX extraction for '{filename}'.")
+            return original_extract_text_from_docx(temp_file_path)
             
     return f"Error: Unsupported file format '{file_extension}'."
 
