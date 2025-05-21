@@ -6,6 +6,8 @@ import random
 import platform 
 import json
 import uuid # Still needed for ATS criteria IDs if you generate them in Python
+import cloudconvert # Import CloudConvert library
+import logging
 
 from functools import wraps
 from dotenv import load_dotenv # For loading .env file
@@ -18,6 +20,9 @@ from flask import (
 # REMOVE: from sqlalchemy_serializer import SerializerMixin
 from supabase import create_client, Client # ADDED for Supabase
 from docx2pdf import convert # Ensure this is imported
+from docx2pdf import convert as docx2pdf_local_convert # Keep for local Windows or if API fails AND LibreOffice not present
+from docx import Document as DocxDocument # For python-docx direct parsing
+
 from werkzeug.security import generate_password_hash, check_password_hash # Still needed
 from pdfminer.high_level import extract_text as pdf_extract_text
 from docx import Document as DocxDocument
@@ -48,6 +53,11 @@ app.secret_key = os.environ.get('SECRET_KEY')
 if not app.secret_key:
     raise RuntimeError("SECRET_KEY environment variable not set!")
 app.config['SESSION_TYPE'] = 'filesystem'
+if not app.debug: # For production on Render, you might want a different level
+    app.logger.setLevel(logging.INFO)
+else: # For local debugging
+    app.logger.setLevel(logging.DEBUG) # To see all debug messages
+app.logger.info("Flask App Logger Initialized.")
 
 # --- Supabase Client Initialization ---
 supabase_url: str = os.environ.get("SUPABASE_URL")
@@ -57,6 +67,19 @@ if not supabase_url or not supabase_key:
     raise RuntimeError("SUPABASE_URL or SUPABASE_KEY environment variables not set!")
 supabase: Client = create_client(supabase_url, supabase_key)
 # --- End Supabase Client Initialization ---
+
+# --- CloudConvert Configuration ---
+app.config['CLOUDCONVERT_API_KEY'] = os.environ.get("CLOUDCONVERT_API_KEY") # Store in app.config
+if app.config.get('CLOUDCONVERT_API_KEY'): # Use app.config.get() for checking
+    try:
+        cloudconvert.configure(api_key=app.config['CLOUDCONVERT_API_KEY'], sandbox=False)
+        print("INFO: CloudConvert configured with API key.")
+    except Exception as e_cc_config:
+        print(f"ERROR: Failed to configure CloudConvert: {e_cc_config}")
+        app.config['CLOUDCONVERT_API_KEY'] = None 
+else:
+    print("WARNING: CLOUDCONVERT_API_KEY not set. DOCX to PDF conversion via API will be skipped.")
+# --- End CloudConvert Configuration ---
 
 # --- Configuration ---
 OCR_SPACE_API_URL = "https://api.ocr.space/parse/image"
@@ -77,6 +100,7 @@ else:
 # END OF ADDED BLOCK
 
 load_dotenv() # Call this very early
+
 
 # --- Master Field Definitions (For Admin Configuration Screens) ---
 MASTER_FIELD_DEFINITIONS = {
@@ -221,33 +245,36 @@ def ocr_image_via_api(image_path):
     except requests.exceptions.RequestException as e: return f"OCR Connection Error: {e}"
     except Exception as e: return f"OCR Processing Error: {e}"
 
+def original_extract_text_from_docx(file_path):
+    try:
+        doc = DocxDocument(file_path)
+        full_text = [p.text for p in doc.paragraphs if p.text]
+        return '\n'.join(full_text).strip() if full_text else "No text extracted from DOCX (direct method)."
+    except Exception as e:
+        app.logger.error(f"Error during direct DOCX text extraction: {e}", exc_info=True)
+        return f"Error extracting text directly from DOCX: {e}"
+
+# PDF text extraction (remains the same)
 def extract_text_from_pdf(file_path):
+    # ... (your existing robust pdfminer.six + OCR fallback logic) ...
     try:
         text = pdf_extract_text(file_path)
         text = text.strip() if text else ""
-        if len(text) < 50: # Threshold for attempting OCR on potentially image-based PDF
-            print(f"DEBUG: PDF '{os.path.basename(file_path)}' yielded little text. Attempting OCR.")
-            ocr_text = ocr_image_via_api(file_path)
+        if len(text) < 50:
+            # app.logger.debug(f"PDF '{os.path.basename(file_path)}' yielded little text. Attempting OCR.")
+            ocr_text = ocr_image_via_api(file_path) # Ensure ocr_image_via_api is defined
             if ocr_text and not ocr_text.lower().startswith("error"): return ocr_text
             if not text and (not ocr_text or ocr_text.lower().startswith("error")):
-                return f"Error: No text extracted from PDF '{os.path.basename(file_path)}' by direct means or OCR."
+                return f"Error: No text extracted from PDF '{os.path.basename(file_path)}' by direct or OCR."
         return text if text else "No text extracted from PDF."
     except Exception as e:
-        print(f"DEBUG: pdfminer failed for '{os.path.basename(file_path)}': {e}. Attempting OCR fallback.")
+        # app.logger.debug(f"pdfminer failed for '{os.path.basename(file_path)}': {e}. OCR fallback.")
         ocr_text = ocr_image_via_api(file_path)
         if ocr_text and not ocr_text.lower().startswith("error"): return ocr_text
         return f"Error extracting text from PDF (pdfminer/OCR failed): {e}"
 
-# This function should ONLY do direct DOCX text extraction
-def original_extract_text_from_docx(file_path): # Renamed to avoid confusion during refactor
-    try:
-        doc = DocxDocument(file_path) # Needs from docx import Document as DocxDocument
-        full_text = [p.text for p in doc.paragraphs if p.text]
-        return '\n'.join(full_text).strip() if full_text else "No text extracted from DOCX (direct method)."
-    except Exception as e:
-        print(f"Error during direct DOCX text extraction: {e}") # Use print or app.logger
-        return f"Error extracting text directly from DOCX: {e}"
-    
+
+
 def extract_text_from_file(temp_file_path, filename):
     _, file_extension = os.path.splitext(filename)
     file_extension = file_extension.lower()
@@ -257,94 +284,31 @@ def extract_text_from_file(temp_file_path, filename):
     elif file_extension == '.pdf':
         return extract_text_from_pdf(temp_file_path)
     elif file_extension == '.docx':
-        # Check if running on Linux (which Render's Docker environment is)
-        if platform.system() == "Linux":
-            print(f"INFO [Linux Environment]: Processing DOCX file via direct soffice call: {filename}")
-            pdf_output_path_linux = temp_file_path + ".pdf" # Path for PDF output
-            temp_dir_linux = os.path.dirname(temp_file_path) # Directory for soffice output
+        print(f"INFO: Processing DOCX file: {filename} using LibreOffice via docx2pdf")
+        pdf_output_path = temp_file_path + ".pdf"
+        try:
+            # docx2pdf on Linux (inside Docker with LibreOffice) will use soffice
+            convert(temp_file_path, pdf_output_path) 
+            
+            if os.path.exists(pdf_output_path):
+                print(f"INFO: DOCX successfully converted to PDF. Extracting text from: {pdf_output_path}")
+                text_from_pdf = extract_text_from_pdf(pdf_output_path)
+                try:
+                    os.remove(pdf_output_path)
+                except OSError as e_os:
+                    print(f"WARNING: Could not remove temporary PDF '{pdf_output_path}': {e_os}")
+                return text_from_pdf
+            else:
+                print(f"WARNING: DOCX to PDF conversion did not create output file for '{filename}'. Falling back to direct.")
+                return original_extract_text_from_docx(temp_file_path) # Your direct python-docx parser
 
-            # This is the base name of the input file without extension.
-            # soffice --outdir . input.docx will create input.pdf
-            base_name_no_ext_linux = os.path.splitext(os.path.basename(temp_file_path))[0]
-            expected_pdf_output_by_soffice_linux = os.path.join(temp_dir_linux, base_name_no_ext_linux + ".pdf")
-
-            try:
-                cmd = [
-                    'soffice', '--headless', '--invisible', '--nocrashreport', '--nodefault', 
-                    '--nofirststartwizard', '--nologo', '--norestore',
-                    '--convert-to', 'pdf', 
-                    '--outdir', temp_dir_linux, 
-                    temp_file_path
-                ]
-                print(f"INFO: Executing soffice command: {' '.join(cmd)}")
-                
-                process = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
-
-                if process.returncode == 0 and os.path.exists(expected_pdf_output_by_soffice_linux):
-                    print(f"INFO: soffice conversion successful. Output: {expected_pdf_output_by_soffice_linux}")
-                    if process.stdout: print(f"INFO: soffice stdout: {process.stdout}")
-                    if process.stderr: print(f"INFO: soffice stderr: {process.stderr}") # Check stderr even on success for warnings
-                    
-                    text_from_pdf = extract_text_from_pdf(expected_pdf_output_by_soffice_linux)
-                    try:
-                        os.remove(expected_pdf_output_by_soffice_linux)
-                    except OSError as e_os:
-                        print(f"WARNING: Could not remove soffice-converted PDF '{expected_pdf_output_by_soffice_linux}': {e_os}")
-                    return text_from_pdf
-                else:
-                    print(f"ERROR: soffice conversion failed for '{filename}'.")
-                    print(f"  Return Code: {process.returncode}")
-                    print(f"  stdout: {process.stdout}")
-                    print(f"  stderr: {process.stderr}")
-                    print(f"  Expected PDF path '{expected_pdf_output_by_soffice_linux}' exists: {os.path.exists(expected_pdf_output_by_soffice_linux)}")
-                    return original_extract_text_from_docx(temp_file_path) # Fallback
-
-            except FileNotFoundError: # This would happen if 'soffice' command is not found
-                print("ERROR: soffice command not found. Is LibreOffice installed correctly and in PATH inside Docker?")
-                return original_extract_text_from_docx(temp_file_path)
-            except subprocess.TimeoutExpired:
-                print(f"ERROR: soffice conversion timed out for {filename}.")
-                return original_extract_text_from_docx(temp_file_path)
-            except Exception as e_soffice:
-                print(f"ERROR: Exception during direct soffice call for '{filename}': {type(e_soffice).__name__} - {e_soffice}")
-                return original_extract_text_from_docx(temp_file_path)
-        
-        elif platform.system() == "Windows": # Your local Windows logic
-            print(f"INFO [Windows Environment]: Processing DOCX file: {filename}")
-            pdf_output_path_windows = temp_file_path + ".pdf"
-            com_initialized_this_call = False
-            try:
-                if pythoncom: # Ensure pythoncom was imported successfully
-                    try:
-                        pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
-                        com_initialized_this_call = True
-                    except pythoncom.com_error as e_com: # More specific exception
-                        print(f"WARNING: Local CoInitializeEx for '{filename}' reported an issue: {e_com}")
-                
-                print(f"INFO: Attempting local docx2pdf conversion (using MS Word COM) for '{filename}'...")
-                from docx2pdf import convert as docx2pdf_local_convert # Local import just in case
-                docx2pdf_local_convert(temp_file_path, pdf_output_path_windows)
-                if os.path.exists(pdf_output_path_windows):
-                    print("INFO: Local docx2pdf conversion successful. Extracting text.")
-                    text_from_local_pdf = extract_text_from_pdf(pdf_output_path_windows)
-                    os.remove(pdf_output_path_windows)
-                    return text_from_local_pdf
-                else:
-                    print("WARNING: Local docx2pdf (MS Word COM) did not create output file.")
-                    return original_extract_text_from_docx(temp_file_path) # Fallback
-            except Exception as e_local_convert:
-                print(f"ERROR: Local docx2pdf (MS Word COM) conversion failed for '{filename}': {e_local_convert}")
-                return original_extract_text_from_docx(temp_file_path) # Fallback
-            finally:
-                if com_initialized_this_call and pythoncom:
-                    pythoncom.CoUninitialize()
-        else: # Other OS or unforeseen case
-            print(f"INFO: Platform {platform.system()} not explicitly handled for DOCX->PDF. Falling back to direct DOCX extraction for '{filename}'.")
+        except Exception as e_convert:
+            print(f"ERROR: Failed to convert DOCX '{filename}' to PDF using LibreOffice: {e_convert}")
+            print(f"INFO: Falling back to direct text extraction from DOCX for '{filename}'.")
             return original_extract_text_from_docx(temp_file_path)
             
     return f"Error: Unsupported file format '{file_extension}'."
 
-# --- Structured Data Extraction ---
 def extract_structured_data(text, fields_to_extract_labels, upload_type=None):
     if not text or not isinstance(text, str) or not fields_to_extract_labels:
         # app.logger.warning(f"extract_structured_data called with invalid text or no fields. Text type: {type(text)}")

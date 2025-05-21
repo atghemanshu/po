@@ -1,2 +1,7 @@
 venv/
 __pycache__/
+*.pyc
+*.db
+.env
+*.pdf # If temporary PDFs are created locally and you don't want to commit them
+temp/ # If your temp folder might contain large or sensitive files
