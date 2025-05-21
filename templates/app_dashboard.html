@@ -130,7 +130,7 @@
                             <h4 class="result-title">
                                 <span>Results for: {{ filename }}</span>
                                 {% if not res_data.error %}
-                                <a href="{{ url_for('download_report', doc_type='po', filename_key=filename) }}" class="btn btn-sm btn-outline-secondary" target="_blank"><i class="bi bi-download me-1"></i>Download Report</a>
+                                <a href="{{ url_for('download_report', doc_type='po', filename_key=filename) }}" class="btn btn-sm btn-outline-dark fs-5 ps-2 pe-2" target="_blank"><i class="bi bi-download me-1 fw-bold"></i>Download Report</a>
                                 {% endif %}
                             </h4>
 
@@ -263,7 +263,7 @@
                     <form method="POST" enctype="multipart/form-data" action="{{ url_for('app_dashboard') }}" class="mb-4">
                         <input type="hidden" name="upload_type" value="ats"><input type="hidden" name="active_tab_id" value="ats">
                         <div class="mb-3">
-                            <label for="atsFiles" class="form-label">Select Resume files (PDFs, DOCX, Images):</label>
+                            <label for="atsFiles" class="form-label">Select Resume files (PDFs, DOCX):</label>
                             <input class="form-control" type="file" id="atsFiles" name="document" accept=".pdf,.docx,image/*" multiple required>
                         </div>
                         <button type="submit" class="btn btn-primary"><i class="fas fa-user-check me-1"></i>Process Resumes</button>
@@ -274,7 +274,7 @@
         <h4 class="result-title">
             <span>Results for: {{ filename }}</span>
             {% if not res_data.error %}
-            <a href="{{ url_for('download_report', doc_type='ats', filename_key=filename) }}" class="btn btn-sm btn-outline-secondary" target="_blank"><i class="bi bi-download me-1"></i>Download Report</a>
+            <a href="{{ url_for('download_report', doc_type='ats', filename_key=filename) }}" class="btn btn-sm btn-outline-dark fs-5 ps-2 pe-2" target="_blank"><i class="bi bi-download me-1 fw-bold"></i>Download Report</a>
             {% endif %}
         </h4>
         {% if res_data.error %}
